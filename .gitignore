@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Dados gerados
+store.db
+*.sqlite
+reports/
+
+# Dados de teste locais: dumps de cookies capturados (sessões reais — NÃO versionar)
+Cookies/
+
+# Playwright
+test-results/
+playwright-report/
+
+# IDE / SO
+.idea/
+.vscode/
+Thumbs.db
