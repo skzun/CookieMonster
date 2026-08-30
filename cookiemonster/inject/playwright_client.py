@@ -91,6 +91,11 @@ def replay(url: str, cookies: List[dict], screenshot_path: Optional[Path] = None
                 result["text"] = ""
             result["sent_cookies"] = sent_cookies
 
+            # O CDP omite o header `Cookie` em request.headers; `context.cookies`
+            # é a fonte confiável dos cookies que o browser detém/envia para o host.
+            jar = context.cookies(target_host_url(url))
+            result["cookie_jar"] = [c["name"] for c in jar]
+
             if screenshot_path:
                 page.screenshot(path=str(screenshot_path), full_page=False)
                 result["screenshot"] = str(screenshot_path)
@@ -107,6 +112,13 @@ def _capture_request(request, host: str, into: list):
     # Registra apenas requisicoes ao host alvo (ou subdominios).
     if url_host == host or url_host.endswith("." + host):
         into.append({"url": request.url, "headers": dict(request.headers)})
+
+
+def target_host_url(url: str) -> str:
+    """Retorna a URL base (scheme://host) de uma URL."""
+    scheme = "https" if url.startswith("https://") else "http"
+    host = url.split("://")[-1].split("/")[0]
+    return f"{scheme}://{host}"
 
 
 __all__ = ["replay", "DEFAULT_USER_AGENT"]

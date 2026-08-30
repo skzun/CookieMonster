@@ -303,7 +303,9 @@ def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
     artifacts = score_artifacts(sent_names, cookies)
 
     # Persistência.
-    run_id = store.record_run(victim, target_url, host, channel)
+    run_id = store.record_run(victim, target_url, host, channel,
+                              state=result["state"],
+                              confidence=result["confidence"])
     findings_rows = [
         (run_id, a["name"], 1 if a["sent"] else 0, a["kind"],
          float(a["score"]) / 10.0, "")
@@ -345,11 +347,56 @@ def _print_check_result(result, sent_names, artifacts, injected):
 
 
 @cli.command()
-@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db")
-@click.option("--out", "out_dir", type=click.Path(path_type=Path), default="reports")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
+@click.option("--out", "out_dir", type=click.Path(path_type=Path), default="reports",
+              show_default=True)
 def report(db_path: Path, out_dir: Path):
-    """[M4] Gera relatórios a partir do store."""
-    console.print("[yellow]Não implementado - previsto na fase M4 (relatório).[/]")
+    """Consolida runs+findings em console, JSON e Markdown."""
+    from .report import builder, console as report_console
+    from .report import json_out, markdown_out
+
+    store = _load_store(str(db_path))
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    data = builder.build_report(store)
+    report_console.render_summary(data)
+    json_out.dump(data, out_dir / "report.json")
+    markdown_out.dump(data, out_dir / "report.md")
+    console.print(f"[green]Relatórios gerados em {out_dir}/[/]")
+
+
+@cli.command()
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
+@click.option("--domain", required=True, help="Domínio alvo (ex.: amazon.com)")
+@click.option("--limit", type=int, default=5, show_default=True,
+              help="Número de vítimas (melhores) a testar")
+@click.option("--channel", type=click.Choice(["playwright", "httpx"]),
+              default="httpx", show_default=True)
+def check_batch(db_path: Path, domain: str, limit: int, channel: str):
+    """Testa as N melhores vítimas de um domínio em lote (check em sequência)."""
+    store = _load_store(str(db_path))
+    best = store.best_victims_for_domain(domain, limit=limit)
+    if not best:
+        console.print(f"[yellow]Nenhuma vítima com cookies para {domain}[/]")
+        return
+
+    victim_ids = [r["victim_id"] for r in best]
+    results = []
+    for vid in victim_ids:
+        console.print(f"\n[bright_black]--- vítima {vid} ---[/]")
+        ctx = click.Context(check)
+        ctx.invoke(check, db_path=db_path, victim=vid, domain=domain,
+                   url=None, channel=channel, req_path="/", shot_dir=None)
+        # Recupera o ultimo run desta vítima/domain para sumarizar.
+        run = store.list_runs()
+        row = next((r for r in run if r["victim_id"] == vid
+                    and r["target_domain"] == domain), None)
+        if row:
+            results.append(row)
+    console.print(f"\n[bold]Batch concluído: {len(results)} runs.[/]")
 
 
 def main() -> int:

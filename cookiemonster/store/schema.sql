@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS runs (
     target_url    TEXT NOT NULL,
     target_domain TEXT NOT NULL,
     channel       TEXT NOT NULL DEFAULT 'playwright',
+    state         TEXT,
+    confidence    REAL,
     started       TEXT,
     finished      TEXT
 );

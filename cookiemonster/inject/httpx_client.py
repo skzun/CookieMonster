@@ -48,7 +48,7 @@ def get(url: str, cookies, headers: Optional[Dict[str, str]] = None,
         "headers": dict(response.headers),
         "text": response.text,
         "history": [(str(r.url), r.status_code) for r in response.history],
-        "cookies_set": {c.name: c.value for c in response.cookies},
+        "cookies_set": dict(response.cookies.items()),
     }
 
 
@@ -72,5 +72,5 @@ def post(url: str, cookies, data: Optional[Dict] = None,
         "headers": dict(response.headers),
         "text": response.text,
         "history": [(str(r.url), r.status_code) for r in response.history],
-        "cookies_set": {c.name: c.value for c in response.cookies},
+        "cookies_set": dict(response.cookies.items()),
     }

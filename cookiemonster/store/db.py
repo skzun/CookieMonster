@@ -28,9 +28,18 @@ class Store:
         conn = self._connect()
         try:
             conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+            self._migrate(conn)
             conn.commit()
         finally:
             conn.close()
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """Migracoes leves/idempotentes para schemas antigos."""
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+        if "state" not in cols:
+            conn.execute("ALTER TABLE runs ADD COLUMN state TEXT")
+        if "confidence" not in cols:
+            conn.execute("ALTER TABLE runs ADD COLUMN confidence REAL")
 
     @contextmanager
     def batch(self) -> Iterator[sqlite3.Connection]:
@@ -93,6 +102,31 @@ class Store:
                 " (SELECT COUNT(*) FROM cookies c WHERE c.victim_id = v.id) AS cookie_count,"
                 " (SELECT COUNT(*) FROM domains d WHERE d.victim_id = v.id) AS domain_count"
                 " FROM victims v ORDER BY v.id"
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def list_runs(self) -> list:
+        """Retorna todos os runs com contagens agregadas."""
+        conn = self._connect()
+        try:
+            return conn.execute(
+                "SELECT r.id, r.victim_id, v.dir_name, r.target_domain, r.target_url,"
+                " r.channel, r.state, r.confidence, r.started, r.finished,"
+                " (SELECT COUNT(*) FROM findings f WHERE f.run_id = r.id) AS finding_count"
+                " FROM runs r JOIN victims v ON v.id = r.victim_id"
+                " ORDER BY r.id DESC"
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def findings_for_run(self, run_id: int) -> list:
+        conn = self._connect()
+        try:
+            return conn.execute(
+                "SELECT cookie_name, sent_to_target, auth_impact, confidence, notes"
+                " FROM findings WHERE run_id = ? ORDER BY confidence DESC",
+                (run_id,),
             ).fetchall()
         finally:
             conn.close()
@@ -211,14 +245,16 @@ class Store:
             conn.close()
 
     def record_run(self, victim_id: int, target_url: str, target_domain: str,
-                   channel: str) -> int:
+                   channel: str, state: str | None = None,
+                   confidence: float | None = None) -> int:
         """Registra um `run` e retorna seu id (para inserir findings depois)."""
         conn = self._connect()
         try:
             cur = conn.execute(
                 "INSERT INTO runs (victim_id, target_url, target_domain, channel,"
-                " started, finished) VALUES (?, ?, ?, ?, ?, ?)",
-                (victim_id, target_url, target_domain, channel,
+                " state, confidence, started, finished)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (victim_id, target_url, target_domain, channel, state, confidence,
                  datetime.now(timezone.utc).isoformat(timespec="seconds"), None),
             )
             conn.commit()

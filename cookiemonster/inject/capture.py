@@ -10,7 +10,13 @@ from typing import List
 
 
 def sent_cookie_names(replay_result: dict) -> List[str]:
-    """Retorna nomes de cookies enviados (coluna `Cookie`) nas requisicoes capturadas."""
+    """Retorna nomes de cookies enviados ao alvo.
+
+    Combina duas fontes:
+    1. header `Cookie` nas requisicoes capturadas (httpx ou CDP quando disponivel);
+    2. `cookie_jar` do browser (context.cookies), que reflete os cookies
+       efetivamente detidos/enviados pelo contexto Playwright.
+    """
     names = set()
     for req in replay_result.get("sent_cookies", []):
         headers = req.get("headers", {})
@@ -19,6 +25,8 @@ def sent_cookie_names(replay_result: dict) -> List[str]:
             pair = pair.strip()
             if "=" in pair:
                 names.add(pair.split("=", 1)[0])
+    for n in replay_result.get("cookie_jar", []):
+        names.add(n)
     return sorted(names)
 
 

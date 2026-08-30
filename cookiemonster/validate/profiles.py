@@ -17,6 +17,10 @@ class SiteProfile:
     def authenticated_markers(self, text: str, url: str, status: int) -> List[str]:
         raise NotImplementedError
 
+    def strong_auth_markers(self) -> List[str]:
+        """Markers cuja presença indica sessao autenticada com alta confiança."""
+        return []
+
     def authenticated_patterns(self) -> List[str]:
         return []
 
@@ -52,6 +56,9 @@ class GenericProfile(SiteProfile):
             found.append("unauthorized")
         return found
 
+    def strong_auth_markers(self) -> List[str]:
+        return ["logout", "sign out", "sign-out", "my account", "minha conta"]
+
 
 class AmazonProfile(GenericProfile):
     """Sinais especificos da Amazon (markers de conta logada)."""
@@ -74,6 +81,12 @@ class AmazonProfile(GenericProfile):
         if "/ap/signin" in (url or "") or "/ap/signin" in (text or ""):
             found.append("signin-redirect")
         return found
+
+    def strong_auth_markers(self) -> List[str]:
+        # "Hello, "/"Your Account" sao ambiguos (aparecem ate deslogado na Amazon,
+        # ex.: "Hello, sign in"). "Sign Out" e "nav-flyout-ya-signout" sao mais
+        # especificos de sessao ativa.
+        return ["Sign Out", "nav-flyout-ya-signout", "account-holder-name"]
 
 
 def get_profile(domain: str) -> SiteProfile:

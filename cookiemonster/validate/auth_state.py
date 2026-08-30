@@ -48,7 +48,8 @@ def detect(baseline: dict, injected: dict, domain: str,
     }
 
     cov = _coverage(i_markers, b_markers)
-    state, confidence = _classify(b_markers, i_markers, b_status, i_status)
+    state, confidence = _classify(b_markers, i_markers, b_status, i_status,
+                                  profile.strong_auth_markers())
 
     return {
         "state": state,
@@ -65,44 +66,32 @@ def _coverage(injected_markers: List[str], baseline_markers: List[str]) -> List[
 
 
 def _classify(b_markers: List[str], i_markers: List[str],
-              b_status, i_status) -> tuple:
+              b_status, i_status, strong_markers: List[str]) -> tuple:
     """Heurística central de classificacao."""
-    has_injected_auth = any(m in i_markers for m in _AUTH_SIGNAL_MARKERS)
-    has_baseline_auth = any(m in b_markers for m in _AUTH_SIGNAL_MARKERS)
+    strong = set(strong_markers)
 
     new_signals = _coverage(i_markers, b_markers)
 
     # Sinais fortes de sessao ativa apenas no injetado.
-    strong_positive = [m for m in new_signals if m in _STRONG_AUTH]
+    strong_positive = [m for m in new_signals if m in strong]
     strong_negative = [m for m in i_markers if m in _STRONG_ANON]
 
     if strong_positive:
-        return VALID, 0.8
-    if has_injected_auth and not has_baseline_auth:
-        return VALID, 0.6
+        return VALID, 0.9
+
+    # Redirecionamento para login / nao-autorizado => sessao invalida.
     if strong_negative:
         return INVALID, 0.8
 
-    # Redirecionamento para login no injetado = sessao invalida.
-    if "redirect-to-login" in i_markers and not has_injected_auth:
-        return INVALID, 0.7
+    # Qualquer sinal distintivo novo (menos forte) tende a indicar sessao ativa.
+    if new_signals:
+        return VALID, 0.6
 
     # Nenhum sinal distinctivo -> indeterminado (conversar conservador).
     return UNKNOWN, 0.3
 
 
 # Markers que indicam sessao autenticada (genericos, lowercase).
-_AUTH_SIGNAL_MARKERS = {
-    "logout", "sign out", "sign-out", "my account", "minha conta",
-    "account settings", "dashboard", "profile", "signed_in",
-    "\"logged_in\":true", "\"authenticated\":true", "\"isloggedin\":true",
-}
-
-_STRONG_AUTH = {
-    "logout", "sign out", "sign-out", "my account", "minha conta",
-    "signed_in", "\"logged_in\":true", "\"authenticated\":true",
-}
-
 _STRONG_ANON = {
     "redirect-to-login", "unauthorized",
 }
