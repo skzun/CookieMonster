@@ -189,3 +189,23 @@ class Store:
             ).fetchall()
         finally:
             conn.close()
+
+    def update_cookie_value(self, victim_id: int, domain: str, name: str,
+                            value: str) -> int:
+        """Altera o valor de um cookie (teste de replay de artefato editado).
+
+        Atualiza todas as linhas de mesmo (victim, domain, name). Retorna o numero
+        de linhas afetadas.
+        """
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "UPDATE cookies SET value = ?"
+                " WHERE victim_id = ? AND name = ?"
+                " AND (domain = ? OR domain LIKE ?)",
+                (value, victim_id, name, domain, "%." + domain),
+            )
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
