@@ -13,6 +13,11 @@ reports/
 # Dados de teste locais: dumps de cookies capturados (sessões reais — NÃO versionar)
 Cookies/
 
+# Resíduos de execução local
+*.log
+*.log.err
+*.pid
+
 # Playwright
 test-results/
 playwright-report/
