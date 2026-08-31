@@ -1,4 +1,4 @@
-"""PRAGMA foreign_keys = ON;
+PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS victims (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,7 +39,6 @@ CREATE TABLE IF NOT EXISTS domains (
 
 CREATE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain);
 
--- Preenchido nas fases M2/M3:
 CREATE TABLE IF NOT EXISTS runs (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     victim_id     INTEGER NOT NULL REFERENCES victims(id) ON DELETE CASCADE,

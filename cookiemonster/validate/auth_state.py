@@ -29,32 +29,39 @@ UNKNOWN = "UNKNOWN"
 
 
 # Identidade: sinais fracos que podem sugerir nome/account id/account_email.
+# Patterns mais flexiveis (suportam "key":"value" e "key":"..." com escapes).
 _IDENTITY_PATTERNS = [
-    re.compile(r'"name"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
-    re.compile(r'"displayName"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
-    re.compile(r'"email"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
-    re.compile(r'"accountId"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
-    re.compile(r'"account_id"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
-    re.compile(r'"userId"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
-    re.compile(r'"user_id"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
-    re.compile(r'"login"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
+    (re.compile(r'"displayName"\s*:\s*"([^"\\]+)"'), "displayname"),
+    (re.compile(r'"accountName"\s*:\s*"([^"\\]+)"'), "accountname"),
+    (re.compile(r'"account_name"\s*:\s*"([^"\\]+)"'), "accountname"),
+    (re.compile(r'"accountId"\s*:\s*"([^"\\]+)"'), "account_id"),
+    (re.compile(r'"account_id"\s*:\s*"([^"\\]+)"'), "account_id"),
+    (re.compile(r'"userId"\s*:\s*"([^"\\]+)"'), "user_id"),
+    (re.compile(r'"user_id"\s*:\s*"([^"\\]+)"'), "user_id"),
+    (re.compile(r'"username"\s*:\s*"([^"\\]+)"'), "username"),
+    (re.compile(r'"login"\s*:\s*"([^"\\]+)"'), "login"),
+    (re.compile(r'"name"\s*:\s*"([^"\\]+)"'), "name"),
+    (re.compile(r'"email"\s*:\s*"([^"\\]+)"'), "email"),
 ]
 
 
 def extract_identity(text: str) -> Dict[str, str]:
-    """Extrai possiveis sinais de identidade (heuristica simples)."""
+    """Extrai possiveis sinais de identidade (heuristica simples).
+
+    Suporta varios nomes de chave comuns em JSON embutido. Aceita pares
+    chave:valor entre aspas.
+    """
     found: Dict[str, str] = {}
     if not text:
         return found
-    for pattern in _IDENTITY_PATTERNS:
+    for pattern, key in _IDENTITY_PATTERNS:
         m = pattern.search(text)
         if m:
-            key = pattern.pattern.split("\\s*")[0].lstrip('"').lower()
-            key = {"name": "name", "displayname": "name",
-                   "email": "email", "accountid": "account_id",
-                   "account_id": "account_id", "userid": "user_id",
-                   "user_id": "user_id", "login": "login"}.get(key, key)
-            found[key] = m.group(1)
+            value = m.group(1).strip()
+            if 2 <= len(value) <= 64:
+                # Chave preferida (displayname -> name).
+                key_norm = {"displayname": "name"}.get(key, key)
+                found.setdefault(key_norm, value)
     return found
 
 

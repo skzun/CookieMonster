@@ -330,9 +330,19 @@ def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
     artifacts = score_artifacts(sent_names, cookies)
 
     # Persistência.
+    from .report import json_out
+    evidence_blob = json_out.dumps({
+        "state": result["state"], "confidence": result["confidence"],
+        "profile": result["profile"], "evidence": result["evidence"],
+        "baseline": {k: baseline.get(k) for k in
+                     ("status", "final_url", "title")},
+        "injected": {k: injected.get(k) for k in
+                      ("status", "final_url", "title")},
+    })
     run_id = store.record_run(victim, target_url, host, channel,
                               state=result["state"],
-                              confidence=result["confidence"])
+                              confidence=result["confidence"],
+                              evidence_json=evidence_blob)
     findings_rows = [
         (run_id, a["name"], 1 if a["sent"] else 0, a["kind"],
          float(a["score"]) / 10.0, "")
@@ -432,7 +442,10 @@ def report(db_path: Path, out_dir: Path):
               help="Número de vítimas (melhores) a testar")
 @click.option("--channel", type=click.Choice(["playwright", "httpx"]),
               default="httpx", show_default=True)
-def check_batch(db_path: Path, domain: str, limit: int, channel: str):
+@click.option("--allow-unsafe-scope", is_flag=True,
+              help="Desativa o guardrail de escopo (fail-safe).")
+def check_batch(db_path: Path, domain: str, limit: int, channel: str,
+                allow_unsafe_scope: bool):
     """Testa as N melhores vítimas de um domínio em lote (check em sequência)."""
     store = _load_store(str(db_path))
     best = store.best_victims_for_domain(domain, limit=limit)
@@ -444,10 +457,11 @@ def check_batch(db_path: Path, domain: str, limit: int, channel: str):
     results = []
     for vid in victim_ids:
         console.print(f"\n[bright_black]--- vítima {vid} ---[/]")
-        ctx = click.Context(check)
-        ctx.invoke(check, db_path=db_path, victim=vid, domain=domain,
-                   url=None, channel=channel, req_path="/", shot_dir=None,
-                   allow_unsafe_scope=False, replay_mode="strict")
+        # click.Context com forward garante que todos os kwargs cheguem.
+        with click.Context(check) as cctx:
+            cctx.invoke(check, db_path=db_path, victim=vid, domain=domain,
+                        url=None, channel=channel, req_path="/", shot_dir=None,
+                        allow_unsafe_scope=allow_unsafe_scope, replay_mode="strict")
         # Recupera o ultimo run desta vítima/domain para sumarizar.
         run = store.list_runs()
         row = next((r for r in run if r["victim_id"] == vid

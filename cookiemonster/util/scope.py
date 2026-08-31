@@ -25,13 +25,14 @@ def load_scope(path: Path | None = None) -> set:
 
 
 def allowed(host: str, path: Path | None = None, unsafe: bool = False) -> bool:
-    """True se o host esta autorizado.
+    """True se o host esta autorizado (ou se --allow-unsafe-scope esta ativo).
 
     Por padrao (fail-safe), recusamos allowlist vazia/inexistente.
     """
+    if unsafe:
+        return True  # opt-in explicito: tudo permitido
     hosts = load_scope(path)
     if not hosts:
-        # Falha segura: sem allowlist, tudo e recusado.
-        return unsafe
+        return False  # fail-safe
     host = (host or "").lower().rstrip(".")
     return host in hosts or any(host.endswith("." + h) for h in hosts)

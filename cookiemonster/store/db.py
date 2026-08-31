@@ -44,6 +44,13 @@ class Store:
         cookie_cols = {r[1] for r in conn.execute("PRAGMA table_info(cookies)")}
         if "attrs" not in cookie_cols:
             conn.execute("ALTER TABLE cookies ADD COLUMN attrs TEXT NOT NULL DEFAULT '{}'")
+        if "same_site" not in cookie_cols:
+            conn.execute("ALTER TABLE cookies ADD COLUMN same_site TEXT DEFAULT 'unknown'")
+        if "partitioned" not in cookie_cols:
+            conn.execute("ALTER TABLE cookies ADD COLUMN partitioned INTEGER DEFAULT 0")
+        run_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+        if "evidence_json" not in run_cols:
+            conn.execute("ALTER TABLE runs ADD COLUMN evidence_json TEXT")
 
     @contextmanager
     def batch(self) -> Iterator[sqlite3.Connection]:
@@ -119,6 +126,7 @@ class Store:
             return conn.execute(
                 "SELECT r.id, r.victim_id, v.dir_name, r.target_domain, r.target_url,"
                 " r.channel, r.state, r.confidence, r.started, r.finished,"
+                " r.evidence_json,"
                 " (SELECT COUNT(*) FROM findings f WHERE f.run_id = r.id) AS finding_count"
                 " FROM runs r JOIN victims v ON v.id = r.victim_id"
                 " ORDER BY r.id DESC"
@@ -252,16 +260,18 @@ class Store:
 
     def record_run(self, victim_id: int, target_url: str, target_domain: str,
                    channel: str, state: str | None = None,
-                   confidence: float | None = None) -> int:
+                   confidence: float | None = None,
+                   evidence_json: str | None = None) -> int:
         """Registra um `run` e retorna seu id (para inserir findings depois)."""
         conn = self._connect()
         try:
             cur = conn.execute(
                 "INSERT INTO runs (victim_id, target_url, target_domain, channel,"
-                " state, confidence, started, finished)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " state, confidence, started, finished, evidence_json)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (victim_id, target_url, target_domain, channel, state, confidence,
-                 datetime.now(timezone.utc).isoformat(timespec="seconds"), None),
+                 datetime.now(timezone.utc).isoformat(timespec="seconds"), None,
+                 evidence_json),
             )
             conn.commit()
             return cur.lastrowid
