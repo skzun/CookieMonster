@@ -26,6 +26,10 @@ class SiteProfile:
     body_selectors: ClassVar[Tuple[str, ...]] = ()
     login_paths: ClassVar[Tuple[str, ...]] = ("/login", "/signin", "/api/signin")
     strong_auth_markers: ClassVar[Tuple[str, ...]] = ()
+    # Caminho (relativo) que so aparece para usuarios autenticados. Se
+    # requisicao a esse caminho redireciona para /login, a sessao e
+    # provavelmente invalida. Ex.: /settings/profile para github.
+    protected_paths: ClassVar[Tuple[str, ...]] = ()
 
     def authenticated_markers(self, text: str, url: str, status: int) -> List[str]:
         return []
@@ -94,6 +98,7 @@ class AmazonProfile(GenericProfile):
         "Your Account", "session-token", "ubid-main", "x-main",
     )
     login_paths = ("/ap/signin",)
+    protected_paths = ("/account", "/your-orders")
     strong_auth_markers = (
         "Sign Out", "Sign out", "nav-flyout-ya-signout",
         "account-holder-name",
@@ -132,6 +137,7 @@ class GitHubProfile(GenericProfile):
         "Signed in as", "dashboard-feed", "feed-title",
     )
     login_paths = ("/login", "/session")
+    protected_paths = ("/settings/profile", "/settings", "/notifications")
     strong_auth_markers = (
         "Your repositories", "Your projects", "Signed in as",
     )
@@ -153,6 +159,8 @@ class SteamProfile(GenericProfile):
     body_selectors = (
         "g_steamID", "AccountName", "store_sale_banner",
     )
+    login_paths = ("/login", "/login/home")
+    protected_paths = ("/account/", "/account/privacy")
     strong_auth_markers = ("g_steamID", "AccountName")
 
 

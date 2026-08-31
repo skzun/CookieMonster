@@ -142,6 +142,34 @@ def replay(url: str, cookies: List[dict], screenshot_path: Optional[Path] = None
             )
             result["readiness"] = readiness
 
+            # Navegacao para rota protegida (segunda volta).
+            # Se o servidor redirecionar para /login, a sessao e invalida.
+            protected_path = (profile.protected_paths[0]
+                              if profile.protected_paths else None)
+            protected_result = {}
+            if protected_path:
+                protected_url = _join_url(url, protected_path)
+                if protected_url:
+                    try:
+                        prot_resp = page.goto(protected_url,
+                                               wait_until="domcontentloaded",
+                                               timeout=15000)
+                        protected_result = {
+                            "url": protected_url,
+                            "status": prot_resp.status if prot_resp else None,
+                            "final_url": page.url,
+                        }
+                        # Se terminou em URL de login, e sinal anonimo.
+                        for login_path in profile.login_paths:
+                            if login_path in page.url:
+                                protected_result["login_redirect"] = True
+                                break
+                        # Pequena espera por XHRs.
+                        page.wait_for_timeout(800)
+                    except Exception as exc:
+                        protected_result["error"] = str(exc)
+            result["protected_path_result"] = protected_result
+
             # AuthProbe estruturado.
             ev = probe(
                 page, events,
@@ -150,6 +178,9 @@ def replay(url: str, cookies: List[dict], screenshot_path: Optional[Path] = None
                 anon_selectors=profile.anonymous_selectors,
                 body_selectors=profile.body_selectors,
             )
+            # Fundir sinal da rota protegida no probe.
+            if protected_result.get("login_redirect"):
+                ev.login_redirect = True
             result["evidence"] = ev.to_dict()
 
             # Snapshot final.
@@ -198,6 +229,18 @@ def target_host_url(url: str) -> str:
     scheme = "https" if url.startswith("https://") else "http"
     host = url.split("://")[-1].split("/")[0]
     return f"{scheme}://{host}"
+
+
+def _join_url(base_url: str, path: str) -> str:
+    """Concatena um path (relativo ou absoluto) ao base_url."""
+    if not path:
+        return ""
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    base = target_host_url(base_url)
+    if not path.startswith("/"):
+        path = "/" + path
+    return base + path
 
 
 __all__ = ["replay", "DEFAULT_USER_AGENT"]

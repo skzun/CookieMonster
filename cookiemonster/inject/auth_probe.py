@@ -147,17 +147,18 @@ def probe(page: Page, events: PageEvents,
         {"url": r["url"], "status": r["status"], "content_type": r["content_type"]}
         for r in auth_responses
     ]
-    # Carregar bodies via playwright Response (busca nas respostas vivas)
+
+    # Parseia os bodies JSON coletados pelo PageEvents (ate 256KB cada).
+    # Quando a response 200 traz JSON com chaves de identidade, setamos os
+    # campos apropriados (api_user_id_present, api_authenticated, etc.).
     for entry in auth_responses:
-        # tenta encontrar a response pelo url
-        try:
-            # page.context().request nao tem cache; usamos o request_hook
-            # para carregar sob demanda. Aqui usamos events.responses que ja
-            # guarda metadata; para body fazemos um lookup do evento via
-            # listeners do page.
-            pass
-        except Exception:
-            pass
+        json_data = entry.get("json")
+        status = entry.get("status")
+        if status == 200 and isinstance(json_data, (dict, list)):
+            _extract_json_identity(json_data, ev)
+        # 401/403 sem payload = forte sinal anonimo
+        elif status in (401, 403):
+            ev.api_anon_status = status
 
     # 2) UI: selectors de autenticado/anonimo (se disponiveis no profile).
     for sel in authenticated_selectors:
