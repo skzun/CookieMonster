@@ -1,5 +1,7 @@
 """Testes do M2 (montagem de cookie header, captura de envio, conversao Playwright)."""
 
+import pytest
+
 from cookiemonster.inject.httpx_client import cookies_to_header
 from cookiemonster.inject.capture import summarize_sent, sent_cookie_names
 from cookiemonster.inject.playwright_client import _to_playwright_cookies
@@ -17,13 +19,14 @@ def test_cookies_to_header_skips_empty_name():
     assert cookies_to_header([{"name": "", "value": "x"}, {"name": "k", "value": "v"}]) == "k=v"
 
 
-def test_summarize_sent():
+def test_summarize_sent_is_deprecated():
     replay = {
         "sent_cookies": [
             {"url": "https://x.com/", "headers": {"cookie": "a=1; b=2"}},
         ]
     }
-    summary = summarize_sent(replay, ["a", "b", "c"])
+    with pytest.warns(DeprecationWarning):
+        summary = summarize_sent(replay, ["a", "b", "c"])
     assert summary["sent"] == ["a", "b"]
     assert summary["not_sent"] == ["c"]
 
@@ -34,7 +37,8 @@ def test_sent_cookie_names_handles_case():
             {"url": "https://x.com/", "headers": {"Cookie": "SID=x; token=y"}},
         ]
     }
-    assert sent_cookie_names(replay) == ["SID", "token"]
+    with pytest.warns(DeprecationWarning):
+        assert sent_cookie_names(replay) == ["SID", "token"]
 
 
 def test_to_playwright_cookies_strips_dot_and_handles_session():

@@ -193,7 +193,6 @@ def inject(db_path: Path, victim: int, domain: str, url: str, channel: str,
            req_path: str, shot_dir: Path, allow_unsafe_scope: bool, replay_mode: str):
     """Injeta os cookies da vítima num contexto de requisição e reporta o envio."""
     from .domain.matcher import applicable_cookies
-    from .inject.capture import summarize_sent
     from .inject import httpx_client, playwright_client
     from .util import scope as scope_util
 
@@ -232,13 +231,19 @@ def inject(db_path: Path, victim: int, domain: str, url: str, channel: str,
     console.print(f"status={result.get('status_code')} final={result.get('final_url')}")
 
     if channel == "playwright":
-        injected_names = [c["name"] for c in cookies]
-        summary = summarize_sent(result, injected_names)
-        console.print(f"[green]Enviados ao alvo ({len(summary['sent'])}):[/] "
-                      + ", ".join(summary["sent"]) if summary["sent"] else "")
-        if summary["not_sent"]:
-            console.print(f"[dim]Não enviados ({len(summary['not_sent'])}):[/] "
-                          + ", ".join(summary["not_sent"]))
+        injected_names = {c["name"] for c in cookies}
+        sent_names = set(result.get("cookie_jar") or [])
+        not_sent = sorted(injected_names - sent_names)
+        unexpected = sorted(sent_names - injected_names)
+        if sent_names:
+            console.print(f"[green]Enviados ao alvo ({len(sent_names)}):[/] "
+                          + ", ".join(sorted(sent_names)))
+        if not_sent:
+            console.print(f"[dim]Não enviados ({len(not_sent)}):[/] "
+                          + ", ".join(not_sent))
+        if unexpected:
+            console.print(f"[dim]Inesperados (cookie_jar sem injetado, {len(unexpected)}):[/] "
+                          + ", ".join(unexpected))
         if result.get("screenshot"):
             console.print(f"[dim]Screenshot: {result['screenshot']}[/]")
 
@@ -286,7 +291,6 @@ def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
                                     CONFIRMED, LIKELY, ANONYMOUS, UNKNOWN)
     from .validate.scoring import score_artifacts
     from .inject import httpx_client, playwright_client
-    from .inject.capture import sent_cookie_names
     from .util import scope as scope_util
 
     store = _load_store(str(db_path))
@@ -341,7 +345,7 @@ def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
         # Canal httpx (sem probe estruturado): usa detector por markers.
         from .validate.auth_state import detect_from_summary
         result = detect_from_summary(baseline, injected, host)
-    sent_names = sent_cookie_names(injected)
+    sent_names = list(injected.get("cookie_jar") or [])
     artifacts = score_artifacts(sent_names, cookies)
 
     # Persistência.
