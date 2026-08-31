@@ -12,3 +12,10 @@
 # Dominio de laboratorio (mock local) — sempre permitido para testes:
 127.0.0.1
 localhost
+
+# Alvos de teste autorizados (dados do proprio laboratorio do usuario):
+amazon.com
+github.com
+steamcommunity.com
+spotify.com
+netflix.com
