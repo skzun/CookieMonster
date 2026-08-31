@@ -15,8 +15,12 @@ def test_netscape_basic_line():
     assert c.path == "/"
     assert c.secure is True
     assert c.host_only is True
-    assert c.http_only is False
+    # Netscape nao traz HttpOnly -> -1 (unknown)
+    assert c.http_only == -1
     assert c.expires_epoch == 1785662434
+    # sameSite nao existe no Netscape -> "unknown"
+    assert c.same_site == "unknown"
+    assert c.partitioned is False
 
 
 def test_netscape_domain_cookie_and_path():
@@ -75,7 +79,7 @@ def test_json_file(tmp_path: Path):
     cookies = parse_json_file(f)
     assert len(cookies) == 2
     assert cookies[0].host_only is True
-    assert cookies[0].http_only is False
+    assert cookies[0].http_only == 0
     assert cookies[1].host_only is False
-    assert cookies[1].http_only is True
+    assert cookies[1].http_only == 1
     assert cookies[1].value == "yes"

@@ -23,10 +23,19 @@ class ParsedCookie:
     path: str
     secure: bool
     host_only: bool
-    http_only: bool
+    http_only: int       # tri-state: 1=True, 0=False, -1=Unknown
     expires_epoch: int
+    same_site: str = "unknown"   # strict|lax|none|unknown
+    partitioned: bool = False
 
     def as_row(self, victim_id: int, browser: str, profile: str, source_file: str) -> tuple:
+        # 15 colunas: termina com attrs (JSON) contendo mesmos valores para
+        # garantir idempotencia sem duplicar colunas no schema.
+        attrs = (
+            '''{"same_site":"''' + self.same_site + '''","partitioned":''' +
+            ("true" if self.partitioned else "false") +
+            ''',"http_only_state":''' + str(int(self.http_only)) + '''}'''
+        )
         return (
             victim_id,
             browser,
@@ -40,6 +49,9 @@ class ParsedCookie:
             int(self.http_only),
             self.expires_epoch,
             source_file,
+            self.same_site,
+            int(self.partitioned),
+            attrs,
         )
 
 
@@ -78,8 +90,10 @@ def parse_line(line: str) -> Optional[ParsedCookie]:
         path=path.strip() or "/",
         secure=_is_true(secure_flag),
         host_only=not include_sub and not domain.startswith("."),
-        http_only=False,  # exportacao Netscape nao carrega HttpOnly
+        http_only=-1,       # formato Netscape nao traz HttpOnly: desconhecido
         expires_epoch=_parse_expiry(expiry),
+        same_site="unknown",
+        partitioned=False,
     )
 
 

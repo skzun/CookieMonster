@@ -1,7 +1,7 @@
 """Testes do M5 (rate limiter e stealth)."""
 
 from cookiemonster.util.rate_limit import RateLimiter, extract_host
-from cookiemonster.util.stealth import new_context_options, random_user_agent
+from cookiemonster.util.stealth import context_options, random_user_agent
 
 
 def test_extract_host():
@@ -19,8 +19,8 @@ def test_rate_limiter_backoff_growth(monkeypatch):
     assert rl.backoff_for("x.com") == 0.0
 
 
-def test_new_context_options():
-    opts = new_context_options()
+def test_context_options():
+    opts = context_options()
     assert "user_agent" in opts
     assert "viewport" in opts
     assert "locale" in opts

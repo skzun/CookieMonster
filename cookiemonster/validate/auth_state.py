@@ -1,55 +1,107 @@
 """Deteccao de estado autenticado por comparacao baseline x injetado.
 
-O resultado e um dos tres estados: SESSION_VALID, SESSION_INVALID ou UNKNOWN,
-acompanhado de evidencias (markers, status, redirects, cookies enviados).
+Resultados:
+  CONFIRMED  - forte evidencia de replay autenticado.
+  LIKELY     - evidencia consistente, mas nao conclusiva.
+  ANONYMOUS  - servidor tratou a requisicao como nao-autenticada.
+  UNKNOWN    - evidencia insuficiente (CAPTCHA, bot check, inconsistencias).
+
+Evidencia estruturada:
+  - baseline_markers / injected_markers
+  - redirect_chain (injetado)
+  - status_code (baseline / injetado)
+  - identity (nome/email/id extraido, quando disponivel)
+  - session_binding_indicators (fingerprint, redirects anomалos, etc.)
 """
 
 from __future__ import annotations
 
-from typing import Dict, List
+import re
+
+from typing import Dict, List, Optional
 
 from .profiles import SiteProfile, get_profile
 
-VALID = "SESSION_VALID"
-INVALID = "SESSION_INVALID"
+CONFIRMED = "CONFIRMED"
+LIKELY = "LIKELY"
+ANONYMOUS = "ANONYMOUS"
 UNKNOWN = "UNKNOWN"
+
+
+# Identidade: sinais fracos que podem sugerir nome/account id/account_email.
+_IDENTITY_PATTERNS = [
+    re.compile(r'"name"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
+    re.compile(r'"displayName"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
+    re.compile(r'"email"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
+    re.compile(r'"accountId"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
+    re.compile(r'"account_id"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
+    re.compile(r'"userId"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
+    re.compile(r'"user_id"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
+    re.compile(r'"login"\s*:\s*"([^"\\]+)"', re.IGNORECASE),
+]
+
+
+def extract_identity(text: str) -> Dict[str, str]:
+    """Extrai possiveis sinais de identidade (heuristica simples)."""
+    found: Dict[str, str] = {}
+    if not text:
+        return found
+    for pattern in _IDENTITY_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            key = pattern.pattern.split("\\s*")[0].lstrip('"').lower()
+            key = {"name": "name", "displayname": "name",
+                   "email": "email", "accountid": "account_id",
+                   "account_id": "account_id", "userid": "user_id",
+                   "user_id": "user_id", "login": "login"}.get(key, key)
+            found[key] = m.group(1)
+    return found
 
 
 def detect(baseline: dict, injected: dict, domain: str,
            profile: SiteProfile | None = None) -> Dict:
     """
-    Determina o estado da sessao.
+    Determina o estado da sessao a partir do baseline e injetado.
 
-    baseline: resumo do replay SEM cookies.
-    injected: resumo do replay COM cookies (da vítima).
-
-    Retorna dict com estado, confianca, evidências e sinais.
+    Retorna:
+      {state, confidence, profile, evidence: {baseline_markers, injected_markers,
+       redirect_chain, status_baseline, status_injected, identity_baseline,
+       identity_injected, session_binding_indicators}}
     """
     profile = profile or get_profile(domain)
 
     b_status = baseline.get("status_code")
-    b_url = baseline.get("final_url") or ""
-    b_text = baseline.get("text") or ""
-    b_markers = profile.authenticated_markers(b_text, b_url, b_status or 0)
-
     i_status = injected.get("status_code")
+    b_url = baseline.get("final_url") or ""
     i_url = injected.get("final_url") or ""
+    b_text = baseline.get("text") or ""
     i_text = injected.get("text") or ""
+
+    b_markers = profile.authenticated_markers(b_text, b_url, b_status or 0)
     i_markers = profile.authenticated_markers(i_text, i_url, i_status or 0)
+    b_identity = extract_identity(b_text)
+    i_identity = extract_identity(i_text)
 
     evidence = {
-        "baseline_status": b_status,
-        "injected_status": i_status,
+        "status_baseline": b_status,
+        "status_injected": i_status,
         "baseline_markers": b_markers,
         "injected_markers": i_markers,
         "baseline_url": b_url,
         "injected_url": i_url,
-        "cookies_sent": injected.get("sent_cookies", []),
+        "identity_baseline": b_identity,
+        "identity_injected": i_identity,
+        "redirect_chain": injected.get("redirect_chain", []),
+        "cookie_jar": injected.get("cookie_jar", []),
     }
 
-    cov = _coverage(i_markers, b_markers)
-    state, confidence = _classify(b_markers, i_markers, b_status, i_status,
-                                  profile.strong_auth_markers())
+    state, confidence = _classify(
+        baseline=baseline, injected=injected,
+        b_markers=b_markers, i_markers=i_markers,
+        b_identity=b_identity, i_identity=i_identity,
+        strong_markers=profile.strong_auth_markers(),
+    )
+    evidence["session_binding_indicators"] = _binding_indicators(baseline, injected)
 
     return {
         "state": state,
@@ -59,41 +111,57 @@ def detect(baseline: dict, injected: dict, domain: str,
     }
 
 
+def _binding_indicators(baseline: dict, injected: dict) -> Dict:
+    """Sinaliza divergencias de fingerprint entre baseline e injetado."""
+    return {
+        "baseline_url": baseline.get("final_url"),
+        "injected_url": injected.get("final_url"),
+        "final_url_matches_baseline": (
+            baseline.get("final_url") == injected.get("final_url")
+        ),
+    }
+
+
 def _coverage(injected_markers: List[str], baseline_markers: List[str]) -> List[str]:
-    """Markers presentes no injetado mas ausentes no baseline (sinal de sessao)."""
     bset = set(baseline_markers)
     return [m for m in injected_markers if m not in bset]
 
 
-def _classify(b_markers: List[str], i_markers: List[str],
-              b_status, i_status, strong_markers: List[str]) -> tuple:
-    """Heurística central de classificacao."""
+def _classify(baseline: dict, injected: dict,
+              b_markers: List[str], i_markers: List[str],
+              b_identity: Dict[str, str], i_identity: Dict[str, str],
+              strong_markers: List[str]) -> tuple:
     strong = set(strong_markers)
 
-    new_signals = _coverage(i_markers, b_markers)
+    new_markers = _coverage(i_markers, b_markers)
+    new_identity_keys = set(i_identity) - set(b_identity)
 
-    # Sinais fortes de sessao ativa apenas no injetado.
-    strong_positive = [m for m in new_signals if m in strong]
-    strong_negative = [m for m in i_markers if m in _STRONG_ANON]
+    i_url = injected.get("final_url") or ""
+    b_url = baseline.get("final_url") or ""
 
-    if strong_positive:
-        return VALID, 0.9
+    # ANONYMOUS: redirect explicito para /login/signin OU strong anon.
+    has_strong_anon = any(m in i_markers for m in ("signin-redirect", "redirect-to-login", "unauthorized"))
 
-    # Redirecionamento para login / nao-autorizado => sessao invalida.
-    if strong_negative:
-        return INVALID, 0.8
+    # CONFIRMED: strong positive (especifico do site) + redirect_chain NAO termina em login.
+    if any(m in new_markers for m in strong) and not has_strong_anon:
+        return CONFIRMED, 0.9
 
-    # Qualquer sinal distintivo novo (menos forte) tende a indicar sessao ativa.
-    if new_signals:
-        return VALID, 0.6
+    # CONFIRMED tambem: identidade NOVA no injetado (nao presente no baseline)
+    # e nenhum sinal anonimo. Identity implica sessao.
+    if new_identity_keys and not has_strong_anon and i_url != b_url:
+        return CONFIRMED, 0.8
+    if new_identity_keys and not has_strong_anon:
+        return LIKELY, 0.7
 
-    # Nenhum sinal distinctivo -> indeterminado (conversar conservador).
+    # LIKELY: marcadores novos que nao sao fortes (podem aparecer publicos).
+    if new_markers and not has_strong_anon:
+        return LIKELY, 0.6
+
+    # ANONYMOUS: sinais fortes negativos.
+    if has_strong_anon:
+        return ANONYMOUS, 0.8
+
+    # Sem marcadores novos.
     return UNKNOWN, 0.3
 
-
-# Markers que indicam sessao autenticada (genericos, lowercase).
-_STRONG_ANON = {
-    "redirect-to-login", "unauthorized",
-}
-
-__all__ = ["detect", "VALID", "INVALID", "UNKNOWN"]
+__all__ = ["detect", "CONFIRMED", "LIKELY", "ANONYMOUS", "UNKNOWN", "extract_identity"]

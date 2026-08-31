@@ -12,7 +12,7 @@ import pytest
 from lab.mock_app import Handler
 
 from cookiemonster.inject import httpx_client
-from cookiemonster.validate.auth_state import detect, VALID, INVALID, UNKNOWN
+from cookiemonster.validate.auth_state import detect, CONFIRMED, LIKELY, ANONYMOUS, UNKNOWN
 
 
 @pytest.fixture(scope="module")
@@ -35,17 +35,17 @@ def test_valid_session_detected(server_url):
     cookies = [{"name": "session", "value": "VALID", "domain": "127.0.0.1",
                 "path": "/", "secure": False, "http_only": True, "expires_epoch": 0}]
     result = _check(server_url + "/", cookies)
-    assert result["state"] == VALID
+    assert result["state"] in (CONFIRMED, LIKELY)
 
 
 def test_no_cookie_is_anonymous(server_url):
     result = _check(server_url + "/", [])
     # Sem cookies, anonimo: baseline == injetado => nao VALID.
-    assert result["state"] in (INVALID, UNKNOWN)
+    assert result["state"] in (ANONYMOUS, UNKNOWN)
 
 
 def test_expired_session_invalid(server_url):
     cookies = [{"name": "session", "value": "EXPIRED", "domain": "127.0.0.1",
                 "path": "/", "secure": False, "http_only": True, "expires_epoch": 0}]
     result = _check(server_url + "/", cookies)
-    assert result["state"] == INVALID
+    assert result["state"] == ANONYMOUS

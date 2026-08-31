@@ -1,4 +1,8 @@
-"""Guardrail de escopo: recusa alvos fora da allowlist local (scope.txt)."""
+"""Guardrail de escopo: recusa alvos fora da allowlist local (scope.txt).
+
+Politica fail-safe: se scope.txt nao existe OU esta vazio OU contem somente
+comentarios, o alvo e RECUSADO. Use --allow-unsafe-scope para desabilitar.
+"""
 
 from __future__ import annotations
 
@@ -20,10 +24,14 @@ def load_scope(path: Path | None = None) -> set:
     return allowed
 
 
-def allowed(host: str, path: Path | None = None) -> bool:
-    """Retorna True se o host esta autorizado (ou se a allowlist esta vazia/desligada)."""
+def allowed(host: str, path: Path | None = None, unsafe: bool = False) -> bool:
+    """True se o host esta autorizado.
+
+    Por padrao (fail-safe), recusamos allowlist vazia/inexistente.
+    """
     hosts = load_scope(path)
     if not hosts:
-        return True  # allowlist vazia = guardrail desligado (aviso no caller)
+        # Falha segura: sem allowlist, tudo e recusado.
+        return unsafe
     host = (host or "").lower().rstrip(".")
     return host in hosts or any(host.endswith("." + h) for h in hosts)

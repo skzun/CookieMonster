@@ -12,7 +12,23 @@ Validador de **session hijacking por cookie replay** — ferramenta CLI standalo
 
 ---
 
-## Aviso de escopo
+## Aviso de escopo e madurez
+
+Ferramenta de **assessment de seguranca / red team autorizado**. Use apenas contra:
+- Ambientes que voce controla.
+- Alvos com **autorizacao explicita por escrito** (bug bounty, pentest contratado, laboratorio).
+
+**Guardrail de escopo:** scope.txt deve listar os dominios autorizados. Por padrao (fail-safe), alvos fora do scope sao RECUSADOS. Para desabilitar, use --allow-unsafe-scope (NAO recomendado).
+
+**Madurez tecnica atual (v0.2.0):**
+- Arquitetura: base estavel para evolucao.
+- Implementacao: replay fiel (Playwright, modo STRICT preserva fingerprint).
+- Fidelidade do cookie replay: SameSite preservado, HttpOnly tri-state, fingerprint estavel.
+- Deteccao de sessao autenticada: estruturada com CONFIRMED/LIKELY/ANONYMOUS/UNKNOWN.
+- Pronto para uso em assessment autorizado: depende de autorizacao + alvará do alvo.
+- **NAO declara conta comprometida com base apenas em heuristica textual.**
+
+Resultados representam **evidencia de que o servidor reconheceu os cookies injetados**, nao prova absoluta de hijack. Falsos positivos (SESSIONVALID sem autenticacao) sao tratados conservadoramente (UNKNOWN/LIKELY).
 
 Ferramenta de **assessment de segurança / red team autorizado**. Use apenas contra:
 

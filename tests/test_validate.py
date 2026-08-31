@@ -1,6 +1,6 @@
 """Testes do M3 (detecção de estado auth, scoring, perfis)."""
 
-from cookiemonster.validate.auth_state import detect, VALID, INVALID, UNKNOWN
+from cookiemonster.validate.auth_state import detect, CONFIRMED, LIKELY, ANONYMOUS, UNKNOWN
 from cookiemonster.validate.scoring import score_artifact
 from cookiemonster.validate.profiles import AmazonProfile, GenericProfile, get_profile
 
@@ -13,7 +13,7 @@ def test_detect_valid_when_only_injected_has_logout():
     baseline = _base(text="<html>Login</html>")
     injected = _base(text="<html>Logout, My Account</html>")
     result = detect(baseline, injected, "example.com")
-    assert result["state"] == VALID
+    assert result["state"] in (CONFIRMED, LIKELY)
     assert result["confidence"] > 0
 
 
@@ -21,7 +21,7 @@ def test_detect_invalid_on_login_redirect():
     baseline = _base(text="")
     injected = _base(status=200, url="https://x.com/ap/signin", text="Sign In")
     result = detect(baseline, injected, "amazon.com")
-    assert result["state"] == INVALID
+    assert result["state"] == ANONYMOUS
 
 
 def test_detect_unknown_when_no_signal():

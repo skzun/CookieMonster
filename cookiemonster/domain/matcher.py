@@ -45,9 +45,9 @@ def _canonical_domain(domain: str) -> str:
 
 
 def _is_public_suffix(domain: str) -> bool:
-    # Um cookie com Domain=.com ou .co.uk nao pode ser aceito (public suffix).
-    # O dominio em si precisa ser exatamente um public suffix para ser rejeitado.
-    return domain.lower() in _PUBLIC_SUFFIXES
+    # Usa a Public Suffix List real (com fallback). Evita Domain=.com/.co.uk etc.
+    from ..util.psl import is_public_suffix as psl_is_public_suffix
+    return psl_is_public_suffix(domain)
 
 
 def domain_match(request_host: str, cookie_domain: str, host_only: bool) -> bool:

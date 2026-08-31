@@ -41,6 +41,10 @@ class Store:
         if "confidence" not in cols:
             conn.execute("ALTER TABLE runs ADD COLUMN confidence REAL")
 
+        cookie_cols = {r[1] for r in conn.execute("PRAGMA table_info(cookies)")}
+        if "attrs" not in cookie_cols:
+            conn.execute("ALTER TABLE cookies ADD COLUMN attrs TEXT NOT NULL DEFAULT '{}'")
+
     @contextmanager
     def batch(self) -> Iterator[sqlite3.Connection]:
         conn = self._connect()
@@ -76,10 +80,12 @@ class Store:
         return cur.lastrowid
 
     def insert_cookies(self, conn: sqlite3.Connection, rows: list) -> None:
+        # 15 colunas (inclui attrs JSON)
         conn.executemany(
             "INSERT INTO cookies (victim_id, browser, profile, name, value, domain,"
-            " path, secure, host_only, http_only, expires_epoch, source_file)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " path, secure, host_only, http_only, expires_epoch, source_file,"
+            " same_site, partitioned, attrs)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
 
