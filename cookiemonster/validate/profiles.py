@@ -94,7 +94,18 @@ def get_profile(domain: str) -> SiteProfile:
     d = (domain or "").strip().rstrip(".").lower()
     if d == "amazon.com" or d.startswith("amazon."):
         return AmazonProfile()
+    custom = _REGISTRY.get(d)
+    if custom is not None:
+        return custom
     return GenericProfile()
+
+
+_REGISTRY: Dict[str, SiteProfile] = {}
+
+
+def register_profile(domain: str, profile: SiteProfile) -> None:
+    """Registra um perfil customizado para um dominio (extensao)."""
+    _REGISTRY[(domain or "").strip().rstrip(".").lower()] = profile
 
 
 PROFILES: Dict[str, SiteProfile] = {
@@ -102,4 +113,7 @@ PROFILES: Dict[str, SiteProfile] = {
     "amazon": AmazonProfile(),
 }
 
-__all__ = ["SiteProfile", "GenericProfile", "AmazonProfile", "get_profile", "PROFILES"]
+__all__ = [
+    "SiteProfile", "GenericProfile", "AmazonProfile",
+    "get_profile", "register_profile", "PROFILES",
+]

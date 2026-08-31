@@ -39,15 +39,50 @@ CookieMonster/
 └── docs/ARCHITECTURE.md    # arquitetura, modelo de dados e CLI
 ```
 
+## Uso
+
+```bash
+# 1. Ingerir os dumps (uma vez; idempotente com --resume)
+python -m cookiemonster ingest --dir Cookies --db store.db --resume
+
+# 2. Encontrar as melhores vítimas para um domínio
+python -m cookiemonster best --domain amazon.com --limit 5
+
+# 3. Listar cookies aplicáveis (matching RFC 6265)
+python -m cookiemonster cookies --victim 4013 --domain amazon.com --scheme https
+
+# 4. Validar o session hijack (baseline × injetado)
+python -m cookiemonster check --victim 4013 --domain amazon.com --channel playwright --screenshot reports
+
+# 5. Lote automático das N melhores vítimas
+python -m cookiemonster check-batch --domain amazon.com --limit 5 --channel httpx
+
+# 6. Consolidar relatórios (matrix + JSON + Markdown)
+python -m cookiemonster report --out reports/
+```
+
+Saída do `check`: `SESSION_VALID` (sessão reproduzida), `SESSION_INVALID` (expirada/negada) ou `UNKNOWN` (evidência insuficiente — bot detection, geobloqueio, etc.), com score dos artefatos de autenticação.
+
+## Instalação
+
+```bash
+pip install -e ".[inject,dev]"   # ou apenas: pip install -e .
+python -m playwright install chromium
+```
+
+## Guardrail de escopo
+
+Edite `scope.txt` e liste os domínios autorizados. Fora dele, `check`/`inject` recusam o alvo. `127.0.0.1`/`localhost` já vêm liberados para o lab.
+
 ## Roadmap
 
-Estado atual: **em construção (fase M0 em andamento)**. Consulte [ROADMAP.md](ROADMAP.md) para o detalhamento das fases e [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) para o desenho técnico.
+Estado: **M0–M5 concluídos**. Consulte [ROADMAP.md](ROADMAP.md) e [CHANGELOG.md](CHANGELOG.md).
 
 | Fase | Descrição | Status |
 |---|---|---|
-| M0 | Ingestão (parser Netscape 2 layouts + store SQLite + CLI skeleton) | 🔨 em andamento |
-| M1 | Domain mapping (matcher RFC 6265 + listagens) | ⏳ |
-| M2 | Injeção & edição (httpx + Playwright + captura + edit) | ⏳ |
-| M3 | Validação (auth-state, perfis de site, scoring, screenshot) | ⏳ |
-| M4 | Relatório (console rich + JSON/MD + batch) | ⏳ |
-| M5 | Endurecimento (rate limit, stealth, lab mock, pytest, docs) | ⏳ |
+| M0 | Ingestão (parser Netscape 2 layouts + store SQLite + CLI) | ✅ |
+| M1 | Domain mapping (matcher RFC 6265 + seleção de vítima) | ✅ |
+| M2 | Injeção & edição (httpx + Playwright + captura + edit) | ✅ |
+| M3 | Validação (auth-state, perfis, scoring, screenshot) | ✅ |
+| M4 | Relatório (console + JSON/MD + batch) | ✅ |
+| M5 | Endurecimento (rate limit, stealth, lab mock, pytest, docs) | ✅ |

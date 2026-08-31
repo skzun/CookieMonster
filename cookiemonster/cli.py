@@ -190,11 +190,17 @@ def inject(db_path: Path, victim: int, domain: str, url: str, channel: str,
     from .domain.matcher import applicable_cookies
     from .inject.capture import summarize_sent
     from .inject import httpx_client, playwright_client
+    from .util import scope as scope_util
 
     store = _load_store(str(db_path))
     raw = store.list_cookies(victim_id=victim, domain=domain, limit=100000)
     scheme = "http" if url.startswith("http://") else "https"
     host = domain.split("://")[-1].strip("/")
+
+    if not scope_util.allowed(host):
+        console.print(f"[red]Recusado: '{host}' fora da allowlist (scope.txt).[/]")
+        return
+
     cookies = applicable_cookies([dict(r) for r in raw], scheme, host, req_path)
 
     if not cookies:
@@ -265,11 +271,16 @@ def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
     from .validate.scoring import score_artifacts
     from .inject import httpx_client, playwright_client
     from .inject.capture import sent_cookie_names
+    from .util import scope as scope_util
 
     store = _load_store(str(db_path))
     host = domain.split("://")[-1].strip("/")
     target_url = url or f"https://{host}{req_path}"
     scheme = "http" if target_url.startswith("http://") else "https"
+
+    if not scope_util.allowed(host):
+        console.print(f"[red]Recusado: '{host}' fora da allowlist (scope.txt).[/]")
+        return
 
     raw = store.list_cookies(victim_id=victim, domain=domain, limit=100000)
     cookies = applicable_cookies([dict(r) for r in raw], scheme, host, req_path)

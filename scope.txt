@@ -1,0 +1,14 @@
+# CookieMonster — allowlist de escopo
+#
+# Liste aqui os dominios/hosts autorizados para replay/check. Um dominio fora
+# desta lista deve ser recusado pela ferramenta (guardrail de escopo).
+# Um por linha; linhas iniciadas por '#' sao comentarios.
+
+# Exemplo:
+# amazon.com
+# amazon.com.br
+# example.com
+
+# Dominio de laboratorio (mock local) — sempre permitido para testes:
+127.0.0.1
+localhost

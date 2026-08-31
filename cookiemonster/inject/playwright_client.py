@@ -64,11 +64,17 @@ def replay(url: str, cookies: List[dict], screenshot_path: Optional[Path] = None
     }
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(
-            user_agent=extra_headers.get("User-Agent", DEFAULT_USER_AGENT) if extra_headers else DEFAULT_USER_AGENT,
-            viewport={"width": 1366, "height": 768},
-        )
+        args = []
+        if headless and not extra_headers:  # stealth padrao: headless=new
+            args = ["--headless=new"]
+        browser = p.chromium.launch(headless=headless, args=args)
+
+        from ..util.stealth import new_context_options
+
+        ctx_opts = new_context_options()
+        if extra_headers and "User-Agent" in extra_headers:
+            ctx_opts["user_agent"] = extra_headers["User-Agent"]
+        context = browser.new_context(**ctx_opts)
         try:
             for c in pw_cookies:
                 try:
