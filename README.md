@@ -10,6 +10,8 @@ Validador de **session hijacking por cookie replay** — ferramenta CLI standalo
 
 > **Exemplo de uso:** quer conferir se os cookies capturados da Amazon ainda são funcionais. Executa o CookieMonster contra `amazon.com` e ele tenta reproduzir a sessão, reportando se o alvo reconheceu os cookies como uma sessão autenticada válida.
 
+**Veja o [MANUAL completo](docs/MANUAL.md)** para instalação, workflow detalhado, exemplos práticos, troubleshooting e referência de comandos.
+
 ---
 
 ## Aviso de escopo e madurez
@@ -18,75 +20,77 @@ Ferramenta de **assessment de seguranca / red team autorizado**. Use apenas cont
 - Ambientes que voce controla.
 - Alvos com **autorizacao explicita por escrito** (bug bounty, pentest contratado, laboratorio).
 
-**Guardrail de escopo:** scope.txt deve listar os dominios autorizados. Por padrao (fail-safe), alvos fora do scope sao RECUSADOS. Para desabilitar, use --allow-unsafe-scope (NAO recomendado).
+**Guardrail de escopo:** `scope.txt` deve listar os dominios autorizados. Por padrao (fail-safe), alvos fora do scope sao **RECUSADOS**. Para desabilitar, use `--allow-unsafe-scope` (NAO recomendado).
 
 **Madurez tecnica atual (v0.2.0):**
 - Arquitetura: base estavel para evolucao.
 - Implementacao: replay fiel (Playwright, modo STRICT preserva fingerprint).
 - Fidelidade do cookie replay: SameSite preservado, HttpOnly tri-state, fingerprint estavel.
-- Deteccao de sessao autenticada: estruturada com CONFIRMED/LIKELY/ANONYMOUS/UNKNOWN.
-- Pronto para uso em assessment autorizado: depende de autorizacao + alvará do alvo.
+- Deteccao de sessao autenticada: estruturada com `CONFIRMED`/`LIKELY`/`ANONYMOUS`/`UNKNOWN`.
+- Pronto para uso em assessment autorizado: depende de autorizacao + alvara do alvo.
 - **NAO declara conta comprometida com base apenas em heuristica textual.**
 
-Resultados representam **evidencia de que o servidor reconheceu os cookies injetados**, nao prova absoluta de hijack. Falsos positivos (SESSIONVALID sem autenticacao) sao tratados conservadoramente (UNKNOWN/LIKELY).
+Resultados representam **evidencia de que o servidor reconheceu os cookies injetados**, nao prova absoluta de hijack.
 
-Ferramenta de **assessment de segurança / red team autorizado**. Use apenas contra:
+## Quickstart (TL;DR)
 
-- Ambientes que você controla.
-- Alvos com **autorização explícita por escrito** (bug bounty scope, pentest contratado, laboratório).
+```bash
+# Setup
+pip install -e .
+python -m playwright install chromium
 
-A ferramenta recusa por padrão alvos fora da allowlist local (`scope.txt`). Cookies aqui presentes são dados de teste/laboratório do próprio usuário.
+# Edite scope.txt com seus dominios autorizados
+
+# Pipeline completo
+python -m cookiemonster ingest --dir Cookies --db store.db --resume
+python -m cookiemonster best --db store.db --domain amazon.com --limit 5
+python -m cookiemonster check --db store.db --victim 1456 --domain amazon.com \
+    --channel playwright --max-wait-ms 8000
+python -m cookiemonster report --db store.db --out reports
+```
+
+Saída de exemplo:
+
+```
+check vitima=1456 https://amazon.com/ [21 cookies aplicaveis, canal=playwright]
+
+ANONYMOUS (confianca 0.85, perfil amazon)
+  sinais injetado: login_redirect
+  diferencial: login_redirect: base=False inj=True
+```
+
+Para **uso detalhado, exemplos, troubleshooting**, consulte **[docs/MANUAL.md](docs/MANUAL.md)**.
 
 ## Stack
 
-- Python 3.14+ · `requests` · `httpx` · `playwright` (browsers já instalados) · `beautifulsoup4` · `rich` · `click` · SQLite.
+Python 3.11+ · `click` · `rich` · `httpx` · `playwright` (Chromium) · `beautifulsoup4` · SQLite.
 
 ## Estrutura
 
 ```
 CookieMonster/
-├── cookiemonster/          # pacote principal (módulos por fase)
-├── Cookies/                # dumps de cookies de teste (Netscape, 2 layouts)
-├── lab/                    # mock server Python puro p/ testes determinísticos
-├── tests/                  # pytest
-├── reports/                # saída dos relatórios
-├── store.db                # SQLite gerado pelo ingest
-├── ROADMAP.md              # roadmap por fases (issues vinculadas)
-└── docs/ARCHITECTURE.md    # arquitetura, modelo de dados e CLI
+├── cookiemonster/          # pacote principal
+│   ├── ingest/             # parser Netscape/JSON + orchestrator
+│   ├── store/              # SQLite store
+│   ├── domain/             # RFC 6265 matcher + auth heuristics
+│   ├── inject/             # httpx + Playwright + AuthProbe (readiness + capture)
+│   ├── validate/           # detector diferencial + perfis de site
+│   ├── report/             # console + JSON + Markdown (atomic write)
+│   └── util/               # PSL, stealth, rate limit, scope guardrail
+├── lab/                    # mock server Python puro p/ testes deterministicos
+├── tests/                  # 68 testes pytest
+├── reports/                # saida dos relatorios
+├── ROADMAP.md              # roadmap M0-M5
+├── CHANGELOG.md            # historico
+├── docs/
+│   ├── ARCHITECTURE.md     # arquitetura tecnica
+│   └── MANUAL.md           # manual de uso (este)
+└── pyproject.toml
 ```
 
-## Uso
+## Links
 
-```bash
-# 1. Ingerir os dumps (uma vez; idempotente com --resume)
-python -m cookiemonster ingest --dir Cookies --db store.db --resume
-
-# 2. Encontrar as melhores vítimas para um domínio
-python -m cookiemonster best --domain amazon.com --limit 5
-
-# 3. Listar cookies aplicáveis (matching RFC 6265)
-python -m cookiemonster cookies --victim 4013 --domain amazon.com --scheme https
-
-# 4. Validar o session hijack (baseline × injetado)
-python -m cookiemonster check --victim 4013 --domain amazon.com --channel playwright --screenshot reports
-
-# 5. Lote automático das N melhores vítimas
-python -m cookiemonster check-batch --domain amazon.com --limit 5 --channel httpx
-
-# 6. Consolidar relatórios (matrix + JSON + Markdown)
-python -m cookiemonster report --out reports/
-```
-
-Saída do `check`: `SESSION_VALID` (sessão reproduzida), `SESSION_INVALID` (expirada/negada) ou `UNKNOWN` (evidência insuficiente — bot detection, geobloqueio, etc.), com score dos artefatos de autenticação.
-
-## Instalação
-
-```bash
-pip install -e ".[inject,dev]"   # ou apenas: pip install -e .
-python -m playwright install chromium
-```
-
-## Guardrail de escopo
-
-Edite `scope.txt` e liste os domínios autorizados. Fora dele, `check`/`inject` recusam o alvo. `127.0.0.1`/`localhost` já vêm liberados para o lab.
-
+- [Manual de uso completo](docs/MANUAL.md)
+- [Arquitetura](docs/ARCHITECTURE.md)
+- [Roadmap M0-M5](ROADMAP.md)
+- [Issues no GitHub](https://github.com/skzun/CookieMonster/issues)
