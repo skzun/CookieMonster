@@ -90,15 +90,3 @@ python -m playwright install chromium
 
 Edite `scope.txt` e liste os domínios autorizados. Fora dele, `check`/`inject` recusam o alvo. `127.0.0.1`/`localhost` já vêm liberados para o lab.
 
-## Roadmap
-
-Estado: **M0–M5 concluídos**. Consulte [ROADMAP.md](ROADMAP.md) e [CHANGELOG.md](CHANGELOG.md).
-
-| Fase | Descrição | Status |
-|---|---|---|
-| M0 | Ingestão (parser Netscape 2 layouts + store SQLite + CLI) | ✅ |
-| M1 | Domain mapping (matcher RFC 6265 + seleção de vítima) | ✅ |
-| M2 | Injeção & edição (httpx + Playwright + captura + edit) | ✅ |
-| M3 | Validação (auth-state, perfis, scoring, screenshot) | ✅ |
-| M4 | Relatório (console + JSON/MD + batch) | ✅ |
-| M5 | Endurecimento (rate limit, stealth, lab mock, pytest, docs) | ✅ |
