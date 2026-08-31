@@ -11,3 +11,10 @@
 127.0.0.1
 localhost
 lab.example.test
+
+# Alvos de teste autorizados (dados do laboratorio do usuario):
+amazon.com
+github.com
+steamcommunity.com
+spotify.com
+netflix.com

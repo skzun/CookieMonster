@@ -445,7 +445,11 @@ def _print_check_result(result, sent_names, artifacts, injected):
             if k == "body_length_delta":
                 bits.append(f"body_delta={v}")
             elif isinstance(v, dict):
-                bits.append(f"{k}: base={v['baseline']} inj={v['injected']}")
+                baseline_v = v.get("baseline")
+                injected_v = v.get("injected")
+                bits.append(f"{k}: base={baseline_v} inj={injected_v}")
+            else:
+                bits.append(f"{k}={v}")
         console.print(f"  diferencial: {' | '.join(bits)}")
 
     if ev.get("status_baseline") is not None:
