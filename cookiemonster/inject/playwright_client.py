@@ -1,12 +1,17 @@
 """Cliente de replay com browser real (Playwright).
 
-Canal canonico de validacao: executa JS, negocia TLS real e permite screenshot.
-Injeta os cookies via `context.add_cookies` e visita o alvo.
+Canal canonico de validacao:
+  1. Cria contexto com fingerprint preservada (STRICT).
+  2. Anexa PageEvents (request/response/console/error).
+  3. goto + wait_for_app_ready (condicional, nao sleep fixo).
+  4. probe() extrai evidencias estruturadas (DOM/network/navigation).
+  5. Snapshot final + screenshot.
+
+Retorna dict com status_code, final_url, title, redirect_chain, sent_cookies,
+cookie_jar, evidence (AuthEvidence), error.
 """
 
 from __future__ import annotations
-
-import json
 
 from pathlib import Path
 from typing import List, Optional
@@ -16,16 +21,16 @@ from playwright.sync_api import sync_playwright
 from ..util.stealth import (
     DEFAULT_USER_AGENT, MODE_STRICT, VALID_MODES, context_options,
 )
-
-_SAMESITE_MAP = {
-    "strict": "Strict",
-    "lax": "Lax",
-    "none": "None",
-}
+from ..validate.profiles import get_profile
+from .evidence import PageEvents
+from .readiness import wait_for_app_ready
+from .auth_probe import probe
 
 
-def _coerce_http_only(value) -> Optional[bool]:
-    """Tri-state: 1/True -> True; 0/False -> False; -1/None -> manter como esta."""
+_SAMESITE_MAP = {"strict": "Strict", "lax": "Lax", "none": "None"}
+
+
+def _coerce_http_only(value):
     if value is None:
         return None
     if isinstance(value, bool):
@@ -35,11 +40,10 @@ def _coerce_http_only(value) -> Optional[bool]:
             return True
         if value == 0:
             return False
-    return None  # unknown
+    return None
 
 
-def _same_site_for_playwright(value: str) -> Optional[str]:
-    """Mapeia o sameSite preservado para a forma aceita por Playwright."""
+def _same_site_for_playwright(value: str):
     if not value:
         return None
     v = value.lower()
@@ -47,11 +51,6 @@ def _same_site_for_playwright(value: str) -> Optional[str]:
 
 
 def _to_playwright_cookies(cookies: List[dict]):
-    """Converte cookies do store para o formato aceito por Playwright.
-
-    Preserva sameSite original (NUNCA inferir de Secure).
-    Preserva httpOnly conforme observado; se unknown, omite (Playwright default).
-    """
     out = []
     for c in cookies:
         domain = (c.get("domain") or "").lstrip(".")
@@ -62,41 +61,38 @@ def _to_playwright_cookies(cookies: List[dict]):
             "path": c.get("path") or "/",
             "secure": bool(c.get("secure")),
         }
-        # httpOnly tri-state: aplica somente quando temos certeza.
         ho = _coerce_http_only(c.get("http_only"))
         if ho is not None:
             pc["httpOnly"] = ho
-
-        # sameSite preservado do dump; se "unknown" ou None, omite.
         ss = _same_site_for_playwright(c.get("same_site") or "")
         if ss is not None:
             pc["sameSite"] = ss
-
         expires = c.get("expires_epoch") or 0
         if expires > 0:
             pc["expires"] = expires
-
         out.append(pc)
     return out
 
 
 def replay(url: str, cookies: List[dict], screenshot_path: Optional[Path] = None,
-           wait_ms: int = 1500, headless: bool = True,
+           max_wait_ms: int = 8000,
+           headless: bool = True,
            extra_headers: Optional[dict] = None,
            mode: str = MODE_STRICT,
-           dump_hint: Optional[dict] = None) -> dict:
+           dump_hint: Optional[dict] = None,
+           probe_profile=None) -> dict:
     """
-    Abre `url` com os cookies injetados e retorna um resumo.
+    Abre `url` com os cookies injetados, aguarda readiness condicional,
+    executa AuthProbe e retorna um resumo estruturado.
 
-    `mode`: STRICT (preserva fingerprint), BROWSER_DEFAULT ou RANDOMIZED.
-    `dump_hint`: dict opcional com fingerprint conhecida (UA, viewport, locale).
+    `probe_profile`: SiteProfile opcional (default: get_profile(host)).
     """
     if mode not in VALID_MODES:
         mode = MODE_STRICT
 
-    scheme = "http" if url.startswith("http://") else "https"
     host = url.split("://")[-1].split("/")[0].split(":")[0]
     pw_cookies = _to_playwright_cookies(cookies)
+    profile = probe_profile or get_profile(host)
 
     result = {
         "status_code": None,
@@ -106,6 +102,8 @@ def replay(url: str, cookies: List[dict], screenshot_path: Optional[Path] = None
         "sent_cookies": [],
         "cookie_jar": [],
         "redirect_chain": [],
+        "evidence": {},
+        "readiness": {},
         "screenshot": None,
         "error": None,
     }
@@ -117,6 +115,7 @@ def replay(url: str, cookies: List[dict], screenshot_path: Optional[Path] = None
         if extra_headers and "User-Agent" in extra_headers:
             ctx_opts["user_agent"] = extra_headers["User-Agent"]
         context = browser.new_context(**ctx_opts)
+        events = PageEvents()
         try:
             for c in pw_cookies:
                 try:
@@ -124,33 +123,63 @@ def replay(url: str, cookies: List[dict], screenshot_path: Optional[Path] = None
                 except Exception:
                     pass
 
-            sent_cookies = []
+            sent_cookies: list = []
             page = context.new_page()
+            events.attach(page)
+            page.on("request", lambda req: _capture_request(req, host, sent_cookies))
 
-            chain: list = []
-            page.on("response", lambda resp: chain.append({
-                "url": resp.url, "status": resp.status,
-            }))
+            try:
+                response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                result["status_code"] = response.status if response else None
+            except Exception as exc:
+                result["error"] = f"goto_failed: {exc}"
 
-            response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(wait_ms)
+            # Readiness condicional (substitui wait_for_timeout fixo).
+            readiness = wait_for_app_ready(
+                page, events,
+                auth_endpoint_hints=profile.identity_endpoints,
+                max_wait_ms=max_wait_ms,
+            )
+            result["readiness"] = readiness
 
-            result["status_code"] = response.status if response else None
-            result["final_url"] = page.url
-            result["title"] = page.title()
+            # AuthProbe estruturado.
+            ev = probe(
+                page, events,
+                auth_endpoints=profile.identity_endpoints,
+                authenticated_selectors=profile.authenticated_selectors,
+                anon_selectors=profile.anonymous_selectors,
+                body_selectors=profile.body_selectors,
+            )
+            result["evidence"] = ev.to_dict()
+
+            # Snapshot final.
             try:
                 result["text"] = page.inner_text("body")
+                result["final_url"] = page.url
+                result["title"] = page.title()
             except Exception:
-                result["text"] = ""
-            result["sent_cookies"] = sent_cookies
-            result["redirect_chain"] = chain
+                pass
 
-            jar = context.cookies(target_host_url(url))
-            result["cookie_jar"] = [c["name"] for c in jar]
+            result["sent_cookies"] = sent_cookies
+            try:
+                jar = context.cookies(target_host_url(url))
+                result["cookie_jar"] = [c["name"] for c in jar]
+            except Exception:
+                pass
+
+            # Redirect chain (compacto).
+            result["redirect_chain"] = [
+                {"url": r["url"], "status": r["status"]}
+                for r in events.responses
+                if r["status"] in (301, 302, 303, 307, 308)
+            ]
 
             if screenshot_path:
-                page.screenshot(path=str(screenshot_path), full_page=False)
-                result["screenshot"] = str(screenshot_path)
+                try:
+                    page.screenshot(path=str(screenshot_path), full_page=False)
+                    result["screenshot"] = str(screenshot_path)
+                except Exception as exc:
+                    result["screenshot_error"] = str(exc)
         except Exception as exc:
             result["error"] = str(exc)
         finally:
@@ -166,7 +195,6 @@ def _capture_request(request, host: str, into: list):
 
 
 def target_host_url(url: str) -> str:
-    """Retorna a URL base (scheme://host) de uma URL."""
     scheme = "https" if url.startswith("https://") else "http"
     host = url.split("://")[-1].split("/")[0]
     return f"{scheme}://{host}"

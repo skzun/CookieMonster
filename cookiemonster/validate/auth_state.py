@@ -1,25 +1,21 @@
-"""Deteccao de estado autenticado por comparacao baseline x injetado.
+"""Detector diferencial baseline x injetado.
 
-Resultados:
-  CONFIRMED  - forte evidencia de replay autenticado.
-  LIKELY     - evidencia consistente, mas nao conclusiva.
-  ANONYMOUS  - servidor tratou a requisicao como nao-autenticada.
-  UNKNOWN    - evidencia insuficiente (CAPTCHA, bot check, inconsistencias).
-
-Evidencia estruturada:
-  - baseline_markers / injected_markers
-  - redirect_chain (injetado)
-  - status_code (baseline / injetado)
-  - identity (nome/email/id extraido, quando disponivel)
-  - session_binding_indicators (fingerprint, redirects anomалos, etc.)
+Compara evidencias estruturadas (AuthEvidence) em vez de procurar substrings
+em texto HTML cru. Resultado:
+  - CONFIRMED: identity/api autenticada diferencial forte.
+  - LIKELY: mudancas diferenciais moderadas (UI autenticada, etc).
+  - ANONYMOUS: sinais de redirecionamento/login no injetado.
+  - UNKNOWN: sem diferenca conclusiva.
 """
 
 from __future__ import annotations
 
-import re
+import json
 
-from typing import Dict, List, Optional
+from dataclasses import asdict
+from typing import Dict, List
 
+from ..inject.auth_probe import AuthEvidence
 from .profiles import SiteProfile, get_profile
 
 CONFIRMED = "CONFIRMED"
@@ -28,147 +24,148 @@ ANONYMOUS = "ANONYMOUS"
 UNKNOWN = "UNKNOWN"
 
 
-# Identidade: sinais fracos que podem sugerir nome/account id/account_email.
-# Patterns mais flexiveis (suportam "key":"value" e "key":"..." com escapes).
-_IDENTITY_PATTERNS = [
-    (re.compile(r'"displayName"\s*:\s*"([^"\\]+)"'), "displayname"),
-    (re.compile(r'"accountName"\s*:\s*"([^"\\]+)"'), "accountname"),
-    (re.compile(r'"account_name"\s*:\s*"([^"\\]+)"'), "accountname"),
-    (re.compile(r'"accountId"\s*:\s*"([^"\\]+)"'), "account_id"),
-    (re.compile(r'"account_id"\s*:\s*"([^"\\]+)"'), "account_id"),
-    (re.compile(r'"userId"\s*:\s*"([^"\\]+)"'), "user_id"),
-    (re.compile(r'"user_id"\s*:\s*"([^"\\]+)"'), "user_id"),
-    (re.compile(r'"username"\s*:\s*"([^"\\]+)"'), "username"),
-    (re.compile(r'"login"\s*:\s*"([^"\\]+)"'), "login"),
-    (re.compile(r'"name"\s*:\s*"([^"\\]+)"'), "name"),
-    (re.compile(r'"email"\s*:\s*"([^"\\]+)"'), "email"),
-]
+def classify(evidence: Dict) -> Dict:
+    """Classifica a partir de um dict AuthEvidence (de probe)."""
+    return {"state": UNKNOWN, "confidence": 0.3}
 
 
-def extract_identity(text: str) -> Dict[str, str]:
-    """Extrai possiveis sinais de identidade (heuristica simples).
+def detect_baseline_vs_injected(baseline_evidence: Dict,
+                                injected_evidence: Dict,
+                                profile: SiteProfile | None = None,
+                                domain: str = "") -> Dict:
+    """Compara AuthEvidence baseline vs injetado.
 
-    Suporta varios nomes de chave comuns em JSON embutido. Aceita pares
-    chave:valor entre aspas.
+    Heurística:
+      - ANONYMOUS forte: injetado tem login_redirect + identity ausente.
+      - CONFIRMED forte: API autenticada no injetado (200 com id) e nao no baseline.
+      - LIKELY: UI autenticada (selectors/markers) diferente entre inj e base.
+      - UNKNOWN: sem diferenca conclusiva.
     """
-    found: Dict[str, str] = {}
-    if not text:
-        return found
-    for pattern, key in _IDENTITY_PATTERNS:
-        m = pattern.search(text)
-        if m:
-            value = m.group(1).strip()
-            if 2 <= len(value) <= 64:
-                # Chave preferida (displayname -> name).
-                key_norm = {"displayname": "name"}.get(key, key)
-                found.setdefault(key_norm, value)
-    return found
+    p = profile or get_profile(domain)
+
+    base = baseline_evidence or {}
+    inj = injected_evidence or {}
+
+    base_api = bool(base.get("api_authenticated") or base.get("api_user_id_present"))
+    inj_api = bool(inj.get("api_authenticated") or inj.get("api_user_id_present"))
+    inj_login = bool(inj.get("login_redirect"))
+    inj_ui = bool(inj.get("authenticated_ui"))
+    base_ui = bool(base.get("authenticated_ui"))
+
+    # Identity apareceu no injetado mas nao no baseline = CONFIRMED
+    identity_diff = (
+        (inj.get("api_user_id_present") and not base.get("api_user_id_present"))
+        or (inj.get("api_user_name_present") and not base.get("api_user_name_present"))
+        or (inj.get("api_user_email_present") and not base.get("api_user_email_present"))
+    )
+
+    if inj_login:
+        state, conf = ANONYMOUS, 0.85
+    elif identity_diff and not inj_login:
+        state, conf = CONFIRMED, 0.9
+    elif inj_api and not base_api and not inj_login:
+        state, conf = CONFIRMED, 0.85
+    elif inj_ui and not base_ui and not inj_login:
+        state, conf = LIKELY, 0.7
+    elif inj.get("ui_markers") and not base.get("ui_markers") and not inj_login:
+        state, conf = LIKELY, 0.6
+    else:
+        state, conf = UNKNOWN, 0.3
+
+    return {
+        "state": state,
+        "confidence": conf,
+        "profile": p.name,
+        "baseline": base,
+        "injected": inj,
+        "differential": _differential(base, inj),
+    }
 
 
-def detect(baseline: dict, injected: dict, domain: str,
-           profile: SiteProfile | None = None) -> Dict:
+def _differential(base: Dict, inj: Dict) -> Dict:
+    diff = {}
+    for key in ("api_authenticated", "api_user_id_present",
+                "api_user_name_present", "api_user_email_present",
+                "authenticated_ui", "login_redirect"):
+        if bool(inj.get(key)) != bool(base.get(key)):
+            diff[key] = {"baseline": bool(base.get(key)),
+                          "injected": bool(inj.get(key))}
+    bl = inj.get("body_length", 0) - base.get("body_length", 0)
+    if abs(bl) > 100:
+        diff["body_length_delta"] = bl
+    return diff
+
+
+def detect_from_summary(baseline: dict, injected: dict, domain: str,
+                        profile: SiteProfile | None = None) -> Dict:
+    """Detector baseado em markers textuais (compatibilidade httpx).
+
+    Usado quando nao ha AuthProbe (cliente httpx). Heuristica:
+      - ANONYMOUS: redirect-login novo no injetado.
+      - CONFIRMED: marker forte novo no injetado.
+      - LIKELY: marker comum novo.
+      - UNKNOWN: sem diferenca.
     """
-    Determina o estado da sessao a partir do baseline e injetado.
-
-    Retorna:
-      {state, confidence, profile, evidence: {baseline_markers, injected_markers,
-       redirect_chain, status_baseline, status_injected, identity_baseline,
-       identity_injected, session_binding_indicators}}
-    """
-    profile = profile or get_profile(domain)
-
+    p = profile or get_profile(domain)
     b_status = baseline.get("status_code")
     i_status = injected.get("status_code")
     b_url = baseline.get("final_url") or ""
     i_url = injected.get("final_url") or ""
     b_text = baseline.get("text") or ""
     i_text = injected.get("text") or ""
+    b_markers = p.authenticated_markers(b_text, b_url, b_status or 0)
+    i_markers = p.authenticated_markers(i_text, i_url, i_status or 0)
 
-    b_markers = profile.authenticated_markers(b_text, b_url, b_status or 0)
-    i_markers = profile.authenticated_markers(i_text, i_url, i_status or 0)
-    b_identity = extract_identity(b_text)
-    i_identity = extract_identity(i_text)
+    bset = set(b_markers)
+    new = [m for m in i_markers if m not in bset]
+    strong = set(p.strong_auth_markers)
 
-    evidence = {
-        "status_baseline": b_status,
-        "status_injected": i_status,
-        "baseline_markers": b_markers,
-        "injected_markers": i_markers,
-        "baseline_url": b_url,
-        "injected_url": i_url,
-        "identity_baseline": b_identity,
-        "identity_injected": i_identity,
-        "redirect_chain": injected.get("redirect_chain", []),
-        "cookie_jar": injected.get("cookie_jar", []),
-    }
+    has_strong_anon = any(m in i_markers for m in
+                         ("signin-redirect", "redirect-to-login", "unauthorized"))
 
-    state, confidence = _classify(
-        baseline=baseline, injected=injected,
-        b_markers=b_markers, i_markers=i_markers,
-        b_identity=b_identity, i_identity=i_identity,
-        strong_markers=profile.strong_auth_markers(),
-    )
-    evidence["session_binding_indicators"] = _binding_indicators(baseline, injected)
+    if any(m in new for m in strong) and not has_strong_anon:
+        state, conf = CONFIRMED, 0.85
+    elif has_strong_anon:
+        state, conf = ANONYMOUS, 0.85
+    elif new:
+        state, conf = LIKELY, 0.6
+    else:
+        state, conf = UNKNOWN, 0.3
 
     return {
         "state": state,
-        "confidence": confidence,
-        "profile": profile.name,
-        "evidence": evidence,
+        "confidence": conf,
+        "profile": p.name,
+        "evidence": {
+            "status_baseline": b_status,
+            "status_injected": i_status,
+            "baseline_markers": b_markers,
+            "injected_markers": i_markers,
+            "new_markers": new,
+        },
     }
 
 
-def _binding_indicators(baseline: dict, injected: dict) -> Dict:
-    """Sinaliza divergencias de fingerprint entre baseline e injetado."""
-    return {
-        "baseline_url": baseline.get("final_url"),
-        "injected_url": injected.get("final_url"),
-        "final_url_matches_baseline": (
-            baseline.get("final_url") == injected.get("final_url")
-        ),
-    }
+# Compatibilidade: `detect` historico baseado em summary (httpx).
+detect = detect_from_summary
 
 
-def _coverage(injected_markers: List[str], baseline_markers: List[str]) -> List[str]:
-    bset = set(baseline_markers)
-    return [m for m in injected_markers if m not in bset]
+def extract_evidence_state(evidence: Dict) -> str:
+    """Helper para o CLI: retorna uma string compacta do estado das evidencias."""
+    if not evidence:
+        return ""
+    parts = []
+    if evidence.get("api_authenticated"):
+        parts.append("api:auth")
+    if evidence.get("api_user_id_present"):
+        parts.append("api:user_id")
+    if evidence.get("authenticated_ui"):
+        parts.append("ui:auth")
+    if evidence.get("login_redirect"):
+        parts.append("login_redirect")
+    return ", ".join(parts) if parts else "no_signals"
 
 
-def _classify(baseline: dict, injected: dict,
-              b_markers: List[str], i_markers: List[str],
-              b_identity: Dict[str, str], i_identity: Dict[str, str],
-              strong_markers: List[str]) -> tuple:
-    strong = set(strong_markers)
-
-    new_markers = _coverage(i_markers, b_markers)
-    new_identity_keys = set(i_identity) - set(b_identity)
-
-    i_url = injected.get("final_url") or ""
-    b_url = baseline.get("final_url") or ""
-
-    # ANONYMOUS: redirect explicito para /login/signin OU strong anon.
-    has_strong_anon = any(m in i_markers for m in ("signin-redirect", "redirect-to-login", "unauthorized"))
-
-    # CONFIRMED: strong positive (especifico do site) + redirect_chain NAO termina em login.
-    if any(m in new_markers for m in strong) and not has_strong_anon:
-        return CONFIRMED, 0.9
-
-    # CONFIRMED tambem: identidade NOVA no injetado (nao presente no baseline)
-    # e nenhum sinal anonimo. Identity implica sessao.
-    if new_identity_keys and not has_strong_anon and i_url != b_url:
-        return CONFIRMED, 0.8
-    if new_identity_keys and not has_strong_anon:
-        return LIKELY, 0.7
-
-    # LIKELY: marcadores novos que nao sao fortes (podem aparecer publicos).
-    if new_markers and not has_strong_anon:
-        return LIKELY, 0.6
-
-    # ANONYMOUS: sinais fortes negativos.
-    if has_strong_anon:
-        return ANONYMOUS, 0.8
-
-    # Sem marcadores novos.
-    return UNKNOWN, 0.3
-
-__all__ = ["detect", "CONFIRMED", "LIKELY", "ANONYMOUS", "UNKNOWN", "extract_identity"]
+__all__ = ["detect_baseline_vs_injected", "detect_from_summary",
+           "detect", "extract_evidence_state",
+           "CONFIRMED", "LIKELY", "ANONYMOUS", "UNKNOWN"]

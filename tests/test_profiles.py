@@ -11,7 +11,7 @@ from cookiemonster.domain.selection import (
 
 def test_github_strong_auth_markers():
     p = GitHubProfile()
-    assert "Your repositories" in p.strong_auth_markers()
+    assert "Your repositories" in list(p.strong_auth_markers)
 
 
 def test_github_detects_dashboard():
@@ -23,17 +23,17 @@ def test_github_detects_dashboard():
 
 def test_steam_strong_auth_markers():
     p = SteamProfile()
-    assert "g_steamID" in p.strong_auth_markers()
+    assert "g_steamID" in list(p.strong_auth_markers)
 
 
 def test_spotify_strong_auth_markers():
     p = SpotifyProfile()
-    assert "your-library" in p.strong_auth_markers()
+    assert "your-library" in list(p.strong_auth_markers)
 
 
 def test_netflix_strong_auth_markers():
     p = NetflixProfile()
-    assert "BobContext" in p.strong_auth_markers()
+    assert "BobContext" in list(p.strong_auth_markers)
 
 
 def test_get_profile_dispatches_to_specific():

