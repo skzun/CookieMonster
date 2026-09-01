@@ -197,9 +197,13 @@ def cookies(db_path: Path, victim: int, domain: str, scheme: str, req_path: str,
 @click.option("--replay-mode", type=click.Choice(["strict", "browser_default", "randomized"]),
               default="strict", show_default=True)
 @click.option("--allow-unsafe-scope", is_flag=True,
-              help="Desativa o guardrail de escopo.")
+              help="Desativa o guardrail de escopo (NÃO recomendado).")
+@click.option("--stealth-profile", "stealth_profile_path",
+              type=click.Path(path_type=Path), default=None,
+              help="OPT-B: perfil de stealth (YAML/JSON) opt-in para LAB com autorizacao.")
 def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
-          channel: str, max_wait_ms: int, replay_mode: str, allow_unsafe_scope: bool):
+          channel: str, max_wait_ms: int, replay_mode: str, allow_unsafe_scope: bool,
+          stealth_profile: Optional[Path] = None):
     """Pipeline unificado: best + cookies + inject + check para um alvo.
 
     Saida amigavel mostrando a vitima escolhida, artefatos de autenticacao
@@ -208,6 +212,21 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
     from .domain.matcher import applicable_cookies
     from .validate.auth_state import CONFIRMED, LIKELY, ANONYMOUS, UNKNOWN
     from .util import scope as scope_util
+
+    # OPT-B: carregar stealth profile (opt-in).
+    stealth_profile = None
+    if stealth_profile_path:
+        try:
+            from .stealth import load_stealth_profile
+            stealth_profile = load_stealth_profile(stealth_profile_path)
+            console.print(f"[bold yellow]>>> STEALTH PROFILE ATIVO:[/bold yellow] "
+                          f"{stealth_profile.name} (risk={stealth_profile.risk})")
+            console.print(f"  [dim]{stealth_profile.description}[/dim]")
+            if stealth_profile.required_authorization:
+                console.print(f"  [dim]Authorization: {stealth_profile.required_authorization}[/dim]")
+        except Exception as exc:
+            console.print(f"[red]Erro ao carregar stealth profile: {exc}[/red]")
+            return
 
     store = _load_store(str(db_path))
     host = domain.split("://")[-1].strip("/")
