@@ -80,12 +80,16 @@ def replay(url: str, cookies: List[dict], screenshot_path: Optional[Path] = None
            extra_headers: Optional[dict] = None,
            mode: str = MODE_STRICT,
            dump_hint: Optional[dict] = None,
-           probe_profile=None) -> dict:
+           probe_profile=None,
+           init_scripts: Optional[List[str]] = None) -> dict:
     """
     Abre `url` com os cookies injetados, aguarda readiness condicional,
     executa AuthProbe e retorna um resumo estruturado.
 
     `probe_profile`: SiteProfile opcional (default: get_profile(host)).
+    `init_scripts`: Lista de scripts JS a injetar via
+        context.add_init_scripts() antes de qualquer pagina carregar.
+        Usado por StealthProfile (OPT-B) para canvas/WebGL/font noise.
     """
     if mode not in VALID_MODES:
         mode = MODE_STRICT
@@ -115,6 +119,15 @@ def replay(url: str, cookies: List[dict], screenshot_path: Optional[Path] = None
         if extra_headers and "User-Agent" in extra_headers:
             ctx_opts["user_agent"] = extra_headers["User-Agent"]
         context = browser.new_context(**ctx_opts)
+        # OPT-B: injetar init scripts (canvas/WebGL/font noise, etc).
+        # Executados ANTES de qualquer pagina carregar.
+        if init_scripts:
+            for script in init_scripts:
+                try:
+                    context.add_init_script(script)
+                except Exception as exc:
+                    # Nao falha replay inteiro se 1 script der problema.
+                    pass
         events = PageEvents()
         try:
             for c in pw_cookies:

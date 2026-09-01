@@ -264,7 +264,8 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
 
     console.print(f"\n[3] [cyan]REPLAY ({channel})[/]")
     res = _probe_one(store, victim["victim_id"], domain, scheme, req_path, target_url,
-                    channel, replay_mode, max_wait_ms)
+                    channel, replay_mode, max_wait_ms,
+                    init_scripts=stealth_profile_obj.to_playwright_init_scripts() if stealth_profile_obj else None)
     if res.get("error"):
         console.print(f"    [red]erro: {res['error'][:120]}[/red]")
     else:
@@ -956,10 +957,14 @@ def _print_probe_all_summary(results, victims, domain, start_time=None, cancelle
 
 
 def _probe_one(store, victim_id, domain, scheme, req_path, target_url,
-               channel, replay_mode, max_wait_ms):
+               channel, replay_mode, max_wait_ms, init_scripts=None):
     """Faz replay + detect para UMA vitima. Retorna dict com classificacao
     estendida (M6.0): state, confidence, auth_context, reason, hints,
     context_dependencies, evidence chain.
+
+    init_scripts: lista de JS para injetar via context.add_init_scripts()
+    antes da pagina carregar (OPT-B: StealthProfile). So tem efeito
+    quando channel=playwright.
 
     Usado por `probe` e `probe-all`.
     """
@@ -986,7 +991,8 @@ def _probe_one(store, victim_id, domain, scheme, req_path, target_url,
             r["sent_cookies"] = [{"headers": {"cookie": httpx_client.cookies_to_header(cookies_)}}]
             return r
         return playwright_client.replay(target_url, cookies_, mode=replay_mode,
-                                        max_wait_ms=max_wait_ms)
+                                        max_wait_ms=max_wait_ms,
+                                        init_scripts=init_scripts)
 
     baseline = replay([])
     injected = replay(matched)
