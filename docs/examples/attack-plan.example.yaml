@@ -1,0 +1,45 @@
+# AttackPlan exemplo para CookieMonster (M7).
+# Carregue com: python -m cookiemonster attack-plan --plan-file docs/examples/attack-plan.example.yaml
+
+# Alvo da investigacao.
+target: chatgpt.com
+
+# (Opcional) vitima especifica. Se ausente, usa a melhor ranqueada.
+victim: 1939
+
+# Phases a executar em ordem.
+# Validas: discover, classify, replay, observe, correlate
+phases:
+  - discover     # lista vitimas candidatas + conta cookies
+  - classify     # probe canonico (1 vitima) + AuthContext
+  - replay       # probe-all (N vitimas) em paralelo
+  - observe      # verifica runs CONFIRMED para access
+  - correlate    # grafo M6.3
+
+# Configuracao da fase replay.
+replay:
+  # Transports validos: http, browser
+  transports: [http, browser]
+  # Variantes de contexto (subset de M6.2). default sempre incluso.
+  context_variants: [default]
+  # Timeout maximo para readiness (ms).
+  max_wait_ms: 10000
+  # Maximo de vitimas a processar (0 = todas).
+  max_victims: 10
+  # Workers paralelos (Playwright pesado: max 4).
+  workers: 3
+  # Quando parar a fase replay cedo.
+  # Validos: authenticated, blocked, inconclusive
+  stop_when: authenticated
+
+# Stop conditions globais (parar o plano inteiro).
+# Validos: authenticated, blocked, inconclusive
+stop_conditions:
+  - authenticated
+  - blocked
+
+# Metadata arbitraria para o report.
+metadata:
+  operator: redteam@example.com
+  authorization: bug-bounty-program/123
+  notes: Primeiro probe contra a API endpoint para reduzir custo de browser.
