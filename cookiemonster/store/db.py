@@ -51,6 +51,10 @@ class Store:
         run_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
         if "evidence_json" not in run_cols:
             conn.execute("ALTER TABLE runs ADD COLUMN evidence_json TEXT")
+        if "auth_context_json" not in run_cols:
+            conn.execute("ALTER TABLE runs ADD COLUMN auth_context_json TEXT")
+        if "reason" not in run_cols:
+            conn.execute("ALTER TABLE runs ADD COLUMN reason TEXT")
 
     @contextmanager
     def batch(self) -> Iterator[sqlite3.Connection]:
@@ -126,7 +130,7 @@ class Store:
             return conn.execute(
                 "SELECT r.id, r.victim_id, v.dir_name, r.target_domain, r.target_url,"
                 " r.channel, r.state, r.confidence, r.started, r.finished,"
-                " r.evidence_json,"
+                " r.evidence_json, r.auth_context_json, r.reason,"
                 " (SELECT COUNT(*) FROM findings f WHERE f.run_id = r.id) AS finding_count"
                 " FROM runs r JOIN victims v ON v.id = r.victim_id"
                 " ORDER BY r.id DESC"
@@ -261,17 +265,24 @@ class Store:
     def record_run(self, victim_id: int, target_url: str, target_domain: str,
                    channel: str, state: str | None = None,
                    confidence: float | None = None,
-                   evidence_json: str | None = None) -> int:
-        """Registra um `run` e retorna seu id (para inserir findings depois)."""
+                   evidence_json: str | None = None,
+                   auth_context_json: str | None = None,
+                   reason: str | None = None) -> int:
+        """Registra um `run` e retorna seu id (para inserir findings depois).
+
+        M6.0: aceita auth_context_json (AuthContext serializado) e reason
+        (string canonica da classificacao).
+        """
         conn = self._connect()
         try:
             cur = conn.execute(
                 "INSERT INTO runs (victim_id, target_url, target_domain, channel,"
-                " state, confidence, started, finished, evidence_json)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " state, confidence, started, finished, evidence_json,"
+                " auth_context_json, reason)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (victim_id, target_url, target_domain, channel, state, confidence,
                  datetime.now(timezone.utc).isoformat(timespec="seconds"), None,
-                 evidence_json),
+                 evidence_json, auth_context_json, reason),
             )
             conn.commit()
             return cur.lastrowid

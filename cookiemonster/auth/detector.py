@@ -180,6 +180,10 @@ _MECHANISM_FINGERPRINTS: List[Dict[str, Any]] = [
             {"kind": "url", "pattern": r"/\.well-known/openid-configuration", "confidence": 0.95},
             {"kind": "url", "pattern": r"/oidc/", "confidence": 0.8},
             {"kind": "json", "pattern": r'"id_token"\s*:', "confidence": 0.85},
+            # NextAuth/Auth.js nao expoe id_token, mas expoe accessToken
+            # e "user.idp" (comportamento classico de NextAuth OIDC).
+            {"kind": "json", "pattern": r'"accessToken"\s*:\s*"eyJ', "confidence": 0.80},
+            {"kind": "json", "pattern": r'"account"\s*:\s*\{[^}]*"planType"', "confidence": 0.85},
         ],
     },
     {

@@ -93,8 +93,7 @@ class Evidence:
     timestamp: float = field(default_factory=time.time)
 
     def to_dict(self) -> Dict[str, Any]:
-        d = asdict(self)
-        return d
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Evidence":
@@ -134,6 +133,11 @@ class AuthContext:
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
+        # Converte enums para string (asdict mantem enums como objetos).
+        d["auth_mechanism"] = self.auth_mechanism.value
+        d["identity_provider"] = self.identity_provider.value
+        d["session_type"] = self.session_type.value
+        d["classification"] = self.classification.value
         return d
 
     @classmethod

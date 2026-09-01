@@ -253,45 +253,7 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
         if channel == "playwright":
             console.print(f"    Cookies enviados ao alvo: [green]{res['cookie_jar_count']}[/green]")
 
-    console.print(f"\n[4] [cyan]VALIDACAO[/]")
-    state = res["state"]
-    conf = res["confidence"]
-    color = {"CONFIRMED": "green", "LIKELY": "cyan", "ANONYMOUS": "red",
-             "UNKNOWN": "yellow"}.get(state, "yellow")
-    state_pt = {
-        "CONFIRMED": "ACESSO CONFIRMADO",
-        "LIKELY": "ACESSO PROVAVEL",
-        "ANONYMOUS": "ACESSO REJEITADO",
-        "UNKNOWN": "INDETERMINADO",
-        "NO_COOKIES": "SEM COOKIES",
-    }
-    console.print(f"    >>> ESTADO: [bold {color}]{state}[/] ([bold]{state_pt.get(state, state)}[/])")
-    console.print(f"    >>> Confianca: [bold]{conf:.2f}[/]")
-    if state == ANONYMOUS:
-        console.print(f"    [red]>>> O servidor RECUSOU os cookies.[/red]")
-    elif state == CONFIRMED:
-        console.print(f"    [green]>>> Identidade diferencial detectada. Acesso provavel.[/green]")
-    elif state == LIKELY:
-        result_obj = res.get("result") or {}
-        if result_obj.get("api_only_confirmed"):
-            console.print(f"    [cyan]>>> API reconheceu identidade, mas UI nao refletiu.[/cyan]")
-            # Mostra o Identity Provider se detectado, para explicar o motivo.
-            inj_ev = result_obj.get("injected", {}) or {}
-            idp = inj_ev.get("identity_provider")
-            if idp:
-                console.print(f"    [dim]    IdP detectado: [yellow]{idp}[/yellow] (login via terceiro)[/dim]")
-                console.print(f"    [dim]    A UI provavelmente exigira re-autenticacao[/dim]")
-                console.print(f"    [dim]    (cf_clearance expirado / IdP check de IP/fingerprint).[/dim]")
-            else:
-                console.print(f"    [dim]    Os cookies podem estar parcialmente validos[/dim]")
-                console.print(f"    [dim]    (ex.: cookie de API ok + cookie de UI expirado).[/dim]")
-            console.print(f"    [dim]    Tente --url com endpoint de identidade para revalidar.[/dim]")
-        else:
-            console.print(f"    [cyan]>>> UI autenticada diferencial, sem identidade explicita.[/cyan]")
-    elif state == "NO_COOKIES":
-        console.print(f"    [yellow]>>> Nenhum cookie aplicavel para a URL.[/yellow]")
-    else:
-        console.print(f"    [yellow]>>> Evidencia insuficiente. Investigue manualmente.[/yellow]")
+    _render_replay_result(res, console)
 
     diff = (res.get("result") or {}).get("differential") or {}
     if diff:
@@ -311,9 +273,240 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
         "baseline_evidence": result.get("baseline", {}),
         "injected_evidence": result.get("injected", {}),
     })
-    run_id = store.record_run(victim["victim_id"], target_url, host, channel,
-                              state=state, confidence=conf, evidence_json=evidence_blob)
+    run_id = store.record_run(
+        victim["victim_id"], target_url, host, channel,
+        state=state, confidence=conf,
+        evidence_json=evidence_blob,
+        auth_context_json=json_out.dumps(result.get("auth_context", {})),
+        reason=result.get("reason", ""),
+    )
     console.print(f"[dim]run_id={run_id} salvo em runs[/dim]")
+
+
+def _render_replay_result(res: dict, console) -> None:
+    """Renderiza o bloco [4] REPLAY RESULT no formato M6.0 AuthContext.
+
+    Separado do `probe` para facilitar testes (consome apenas o dict
+    produzido por _probe_one).
+    """
+    console.print(f"\n[4] [cyan]REPLAY RESULT (M6.0 AuthContext)[/]")
+    state = res["state"]
+    conf = res["confidence"]
+    result_obj = res.get("result") or {}
+
+    # Mapeamento estendido (M6.0) + retrocompat com CONFIRMED/LIKELY/...
+    color = {
+        "AUTHENTICATED": "green", "CONFIRMED": "green",
+        "CONTEXT_BOUND": "yellow", "LIKELY": "cyan",
+        "IDP_BOUND": "yellow", "MFA_BLOCKED": "red",
+        "BOT_BLOCKED": "red", "ANONYMOUS": "red",
+        "INCONCLUSIVE": "yellow", "UNKNOWN": "yellow",
+        "NO_COOKIES": "dim",
+    }.get(state, "yellow")
+    state_pt = {
+        "AUTHENTICATED": "ACESSO CONFIRMADO",
+        "CONFIRMED": "ACESSO CONFIRMADO",
+        "CONTEXT_BOUND": "ACESSO CONTEXTO-DEPENDENTE",
+        "LIKELY": "ACESSO PROVAVEL",
+        "IDP_BOUND": "ACESSO BLOQUEADO POR IDP",
+        "MFA_BLOCKED": "ACESSO BLOQUEADO POR MFA",
+        "BOT_BLOCKED": "ACESSO BLOQUEADO POR ANTI-BOT",
+        "ANONYMOUS": "ACESSO REJEITADO",
+        "INCONCLUSIVE": "INDETERMINADO",
+        "UNKNOWN": "INDETERMINADO",
+        "NO_COOKIES": "SEM COOKIES",
+    }
+    console.print(f"    >>> Classification: [bold {color}]{state}[/] "
+                  f"([bold]{state_pt.get(state, state)}[/])")
+    console.print(f"    >>> Confidence:     [bold]{conf:.2f}[/]")
+
+    # Reason canonica (M6.0).
+    reason = result_obj.get("reason") or res.get("reason") or ""
+    if reason:
+        console.print(f"    >>> Reason:         [dim]{reason}[/dim]")
+
+    # AuthContext (M6.0): mechanism, IdP, session type, deps.
+    # auth_context dict e a fonte canonica. Fallback para res/result
+    # apenas se ele nao existir.
+    auth_ctx_dict = res.get("auth_context") or {}
+    auth_mech = auth_ctx_dict.get("auth_mechanism") or "unknown"
+    idp = auth_ctx_dict.get("identity_provider") or "none"
+    session_t = auth_ctx_dict.get("session_type") or "unknown"
+    deps = res.get("context_dependencies") or result_obj.get("context_dependencies") or []
+    bot = bool(res.get("bot_challenge_detected")
+               or result_obj.get("bot_challenge_detected", False)
+               or auth_ctx_dict.get("bot_challenge_detected", False))
+    mfa = bool(res.get("mfa_challenge_detected")
+               or result_obj.get("mfa_challenge_detected", False)
+               or auth_ctx_dict.get("mfa_challenge_detected", False))
+
+    console.print(f"    >>> Mechanism:      [cyan]{auth_mech}[/cyan]")
+    if idp not in ("none", "unknown"):
+        console.print(f"    >>> IdP:            [yellow]{idp}[/yellow] "
+                      f"[dim](login via terceiro - cookies podem requerer contexto adicional)[/dim]")
+    else:
+        console.print(f"    >>> IdP:            [dim]{idp}[/dim]")
+    console.print(f"    >>> Session type:   [dim]{session_t}[/dim]")
+    if deps:
+        console.print(f"    >>> Dependencies:   [yellow]{', '.join(deps)}[/yellow] "
+                      f"[dim](replay pode depender desses contextos)[/dim]")
+    if bot:
+        console.print(f"    >>> [red]Anti-bot challenge detectado[/red]")
+    if mfa:
+        console.print(f"    >>> [red]MFA challenge detectado[/red]")
+
+    # Mensagem especifica por classification.
+    if state in ("ANONYMOUS",):
+        console.print(f"    [red]>>> O servidor RECUSOU os cookies.[/red]")
+    elif state in ("AUTHENTICATED", "CONFIRMED"):
+        console.print(f"    [green]>>> Identidade diferencial detectada. Acesso provavel.[/green]")
+    elif state in ("CONTEXT_BOUND", "LIKELY"):
+        if result_obj.get("api_only_confirmed"):
+            console.print(f"    [cyan]>>> API reconheceu identidade, mas UI nao refletiu.[/cyan]")
+        else:
+            console.print(f"    [cyan]>>> UI autenticada diferencial, sem identidade explicita.[/cyan]")
+    elif state == "IDP_BOUND":
+        console.print(f"    [yellow]>>> Sessao requer validacao no Identity Provider externo.[/yellow]")
+        console.print(f"    [dim]    (cf_clearance expirado / IdP check de IP/fingerprint).[/dim]")
+    elif state == "MFA_BLOCKED":
+        console.print(f"    [yellow]>>> IdP exige MFA. Cookie sozinho nao basta.[/yellow]")
+    elif state == "BOT_BLOCKED":
+        console.print(f"    [yellow]>>> Anti-bot challenge bloqueou replay.[/yellow]")
+        console.print(f"    [dim]    (Cloudflare, reCAPTCHA, DataDome, etc).[/dim]")
+    elif state == "NO_COOKIES":
+        console.print(f"    [yellow]>>> Nenhum cookie aplicavel para a URL.[/yellow]")
+    else:
+        console.print(f"    [yellow]>>> Evidencia insuficiente. Investigue manualmente.[/yellow]")
+
+    # Cadeia de evidencias (top 5 mais relevantes).
+    auth_ctx_dict = res.get("auth_context") or {}
+    evidence_list = auth_ctx_dict.get("evidence") or []
+    if evidence_list:
+        console.print(f"\n    [dim]Evidence chain (top 5 de {len(evidence_list)}):[/dim]")
+        for ev in evidence_list[:5]:
+            t = ev.get("type", "?")
+            v = ev.get("value", "")
+            conf_ev = ev.get("confidence", 0)
+            src = ev.get("source", "?")
+            v_short = str(v)[:60] + ".." if len(str(v)) > 62 else str(v)
+            console.print(f"      [dim][{src}] {t} (conf {conf_ev:.2f}): {v_short}[/dim]")
+    # Hints.
+    hints = res.get("hints") or result_obj.get("hints") or []
+    if hints:
+        console.print(f"    [dim]Hints: {', '.join(hints)}[/dim]")
+
+
+def _render_replay_result(res: dict, console) -> None:
+    """Renderiza o bloco [4] REPLAY RESULT no formato M6.0 AuthContext.
+
+    Separado do `probe` para facilitar testes (consome apenas o dict
+    produzido por _probe_one).
+    """
+    console.print(f"\n[4] [cyan]REPLAY RESULT (M6.0 AuthContext)[/]")
+    state = res["state"]
+    conf = res["confidence"]
+    result_obj = res.get("result") or {}
+
+    # Mapeamento estendido (M6.0) + retrocompat com CONFIRMED/LIKELY/...
+    color = {
+        "AUTHENTICATED": "green", "CONFIRMED": "green",
+        "CONTEXT_BOUND": "yellow", "LIKELY": "cyan",
+        "IDP_BOUND": "yellow", "MFA_BLOCKED": "red",
+        "BOT_BLOCKED": "red", "ANONYMOUS": "red",
+        "INCONCLUSIVE": "yellow", "UNKNOWN": "yellow",
+        "NO_COOKIES": "dim",
+    }.get(state, "yellow")
+    state_pt = {
+        "AUTHENTICATED": "ACESSO CONFIRMADO",
+        "CONFIRMED": "ACESSO CONFIRMADO",
+        "CONTEXT_BOUND": "ACESSO CONTEXTO-DEPENDENTE",
+        "LIKELY": "ACESSO PROVAVEL",
+        "IDP_BOUND": "ACESSO BLOQUEADO POR IDP",
+        "MFA_BLOCKED": "ACESSO BLOQUEADO POR MFA",
+        "BOT_BLOCKED": "ACESSO BLOQUEADO POR ANTI-BOT",
+        "ANONYMOUS": "ACESSO REJEITADO",
+        "INCONCLUSIVE": "INDETERMINADO",
+        "UNKNOWN": "INDETERMINADO",
+        "NO_COOKIES": "SEM COOKIES",
+    }
+    console.print(f"    >>> Classification: [bold {color}]{state}[/] "
+                  f"([bold]{state_pt.get(state, state)}[/])")
+    console.print(f"    >>> Confidence:     [bold]{conf:.2f}[/]")
+
+    # Reason canonica (M6.0).
+    reason = result_obj.get("reason") or res.get("reason") or ""
+    if reason:
+        console.print(f"    >>> Reason:         [dim]{reason}[/dim]")
+
+    # AuthContext (M6.0): mechanism, IdP, session type, deps.
+    # auth_context dict e a fonte canonica. Fallback para res/result
+    # apenas se ele nao existir.
+    auth_ctx_dict = res.get("auth_context") or {}
+    auth_mech = auth_ctx_dict.get("auth_mechanism") or "unknown"
+    idp = auth_ctx_dict.get("identity_provider") or "none"
+    session_t = auth_ctx_dict.get("session_type") or "unknown"
+    deps = res.get("context_dependencies") or result_obj.get("context_dependencies") or []
+    bot = bool(res.get("bot_challenge_detected")
+               or result_obj.get("bot_challenge_detected", False)
+               or auth_ctx_dict.get("bot_challenge_detected", False))
+    mfa = bool(res.get("mfa_challenge_detected")
+               or result_obj.get("mfa_challenge_detected", False)
+               or auth_ctx_dict.get("mfa_challenge_detected", False))
+
+    console.print(f"    >>> Mechanism:      [cyan]{auth_mech}[/cyan]")
+    if idp not in ("none", "unknown"):
+        console.print(f"    >>> IdP:            [yellow]{idp}[/yellow] "
+                      f"[dim](login via terceiro - cookies podem requerer contexto adicional)[/dim]")
+    else:
+        console.print(f"    >>> IdP:            [dim]{idp}[/dim]")
+    console.print(f"    >>> Session type:   [dim]{session_t}[/dim]")
+    if deps:
+        console.print(f"    >>> Dependencies:   [yellow]{', '.join(deps)}[/yellow] "
+                      f"[dim](replay pode depender desses contextos)[/dim]")
+    if bot:
+        console.print(f"    >>> [red]Anti-bot challenge detectado[/red]")
+    if mfa:
+        console.print(f"    >>> [red]MFA challenge detectado[/red]")
+
+    # Mensagem especifica por classification.
+    if state in ("ANONYMOUS",):
+        console.print(f"    [red]>>> O servidor RECUSOU os cookies.[/red]")
+    elif state in ("AUTHENTICATED", "CONFIRMED"):
+        console.print(f"    [green]>>> Identidade diferencial detectada. Acesso provavel.[/green]")
+    elif state in ("CONTEXT_BOUND", "LIKELY"):
+        if result_obj.get("api_only_confirmed"):
+            console.print(f"    [cyan]>>> API reconheceu identidade, mas UI nao refletiu.[/cyan]")
+        else:
+            console.print(f"    [cyan]>>> UI autenticada diferencial, sem identidade explicita.[/cyan]")
+    elif state == "IDP_BOUND":
+        console.print(f"    [yellow]>>> Sessao requer validacao no Identity Provider externo.[/yellow]")
+        console.print(f"    [dim]    (cf_clearance expirado / IdP check de IP/fingerprint).[/dim]")
+    elif state == "MFA_BLOCKED":
+        console.print(f"    [yellow]>>> IdP exige MFA. Cookie sozinho nao basta.[/yellow]")
+    elif state == "BOT_BLOCKED":
+        console.print(f"    [yellow]>>> Anti-bot challenge bloqueou replay.[/yellow]")
+        console.print(f"    [dim]    (Cloudflare, reCAPTCHA, DataDome, etc).[/dim]")
+    elif state == "NO_COOKIES":
+        console.print(f"    [yellow]>>> Nenhum cookie aplicavel para a URL.[/yellow]")
+    else:
+        console.print(f"    [yellow]>>> Evidencia insuficiente. Investigue manualmente.[/yellow]")
+
+    # Cadeia de evidencias (top 5 mais relevantes).
+    auth_ctx_dict = res.get("auth_context") or {}
+    evidence_list = auth_ctx_dict.get("evidence") or []
+    if evidence_list:
+        console.print(f"\n    [dim]Evidence chain (top 5 de {len(evidence_list)}):[/dim]")
+        for ev in evidence_list[:5]:
+            t = ev.get("type", "?")
+            v = ev.get("value", "")
+            conf_ev = ev.get("confidence", 0)
+            src = ev.get("source", "?")
+            v_short = str(v)[:60] + ".." if len(str(v)) > 62 else str(v)
+            console.print(f"      [dim][{src}] {t} (conf {conf_ev:.2f}): {v_short}[/dim]")
+    # Hints.
+    hints = res.get("hints") or result_obj.get("hints") or []
+    if hints:
+        console.print(f"    [dim]Hints: {', '.join(hints)}[/dim]")
 
 
 # ---- Fase A2: probe-all -- todas as vitimas do dominio em paralelo ----
@@ -493,22 +686,34 @@ def _print_probe_all_summary(results, victims, domain, start_time=None, cancelle
             console.print(f"  [{color}]{state:9}[/] ({pt}): {n}")
 
     console.print(f"\n[bold]Detalhes (top 30)[/bold]")
-    console.print(f"  {'VID':>5}  {'STATE':>9}  {'CONF':>5}  {'AUTH':>4}  {'TOTAL':>5}  {'MOTIVO':<28}  {'FINAL_URL':<50}")
+    console.print(f"  {'VID':>5}  {'STATE':>11}  {'CONF':>5}  {'IdP':<10}  {'MECH':<11}  {'REASON':<26}  {'DEP':<12}  {'FINAL_URL':<32}")
     sorted_r = sorted(results, key=lambda r: (
-        {"CONFIRMED": 0, "LIKELY": 1}.get(r["state"], 2),
+        {"AUTHENTICATED": 0, "CONFIRMED": 0,
+         "CONTEXT_BOUND": 1, "LIKELY": 1,
+         "IDP_BOUND": 2, "MFA_BLOCKED": 2,
+         "BOT_BLOCKED": 2, "ANONYMOUS": 3,
+         "INCONCLUSIVE": 4, "UNKNOWN": 4}.get(r["state"], 5),
         -float(r.get("confidence", 0) or 0)
     ))
     for r in sorted_r[:30]:
         url = r.get("final_url") or "(sem replay)"
-        if len(url) > 48:
-            url = url[:48] + ".."
-        reasons = r.get("unknown_reasons") or []
-        motivo = ",".join(reasons) if reasons else "-"
-        if len(motivo) > 26:
-            motivo = motivo[:26] + ".."
-        console.print(f"  {r['victim_id']:>5}  {r.get('state', '?'):>9}  "
-                      f"{r.get('confidence', 0):5.2f}  {r.get('auth', 0):>4}  "
-                      f"{r.get('total', 0):>5}  {motivo:<28}  {url}")
+        if len(url) > 30:
+            url = url[:30] + ".."
+        reason = r.get("reason") or "-"
+        if len(reason) > 24:
+            reason = reason[:24] + ".."
+        idp = r.get("identity_provider") or "none"
+        if idp == "none" or idp == "unknown":
+            idp_disp = "-"
+        else:
+            idp_disp = idp[:10]
+        mech = r.get("auth_mechanism") or "unknown"
+        mech_disp = mech[:11] if mech not in ("none", "unknown") else "-"
+        deps = r.get("context_dependencies") or []
+        deps_disp = ",".join(deps)[:12] if deps else "-"
+        console.print(f"  {r['victim_id']:>5}  {r.get('state', '?'):>11}  "
+                      f"{r.get('confidence', 0):5.2f}  {idp_disp:<10}  "
+                      f"{mech_disp:<11}  {reason:<26}  {deps_disp:<12}  {url}")
     if len(results) > 30:
         console.print(f"  [dim]...+ {len(results) - 30} mais[/dim]")
 
@@ -547,13 +752,18 @@ def _print_probe_all_summary(results, victims, domain, start_time=None, cancelle
 
 def _probe_one(store, victim_id, domain, scheme, req_path, target_url,
                channel, replay_mode, max_wait_ms):
-    """Faz replay + detect para UMA vitima. Retorna (state, conf, result, error).
+    """Faz replay + detect para UMA vitima. Retorna dict com classificacao
+    estendida (M6.0): state, confidence, auth_context, reason, hints,
+    context_dependencies, evidence chain.
 
     Usado por `probe` e `probe-all`.
     """
     from .domain.matcher import applicable_cookies
     from .validate.auth_state import (detect_baseline_vs_injected,
-                                    detect_from_summary, CONFIRMED)
+                                    detect_from_summary)
+    from .auth import (
+        detect_all, classify, AuthContext,
+    )
 
     host = domain.split("://")[-1].strip("/")
     raw = store.list_cookies(victim_id=victim_id, domain=domain, limit=100000)
@@ -582,14 +792,82 @@ def _probe_one(store, victim_id, domain, scheme, req_path, target_url,
         injected = {"status_code": None, "final_url": "", "text": "",
                     "evidence": {}, "sent_cookies": [], "cookie_jar": []}
 
-    if baseline.get("evidence") and injected.get("evidence"):
-        result = detect_baseline_vs_injected(baseline["evidence"],
-                                            injected["evidence"], domain=host)
+    base_ev = baseline.get("evidence") or {}
+    inj_ev = injected.get("evidence") or {}
+
+    # M6.0: constroi AuthContext via detector (detecta IdP, mechanism, etc).
+    # Combina observacoes de ambos os lados (inj e base) para fingerprinting.
+    cookie_jar = injected.get("cookie_jar") or []
+    if cookie_jar and isinstance(cookie_jar[0], str):
+        # Formato antigo: lista de strings (nomes).
+        cookie_names = cookie_jar
     else:
-        result = detect_from_summary(baseline, injected, host)
+        # Formato novo: lista de dicts com name/value/domain.
+        cookie_names = [c.get("name", "") for c in cookie_jar if isinstance(c, dict)]
+    observation_text = {
+        "url": injected.get("final_url") or target_url,
+        "body": (injected.get("text") or "")[:8000],
+        "html": (injected.get("text") or "")[:8000],
+        "title": injected.get("page_title") or "",
+        "cookie_names": cookie_names,
+    }
+    # Headers do baseline (sem cookies) para detectar challenge/bot.
+    base_text = {
+        "url": baseline.get("final_url") or target_url,
+        "body": (baseline.get("text") or "")[:4000],
+        "cookie_names": [],
+    }
+    auth_ctx = detect_all(observation_text, target=host)
+    # Tambem processa baseline para detectar bot challenge.
+    detect_all(base_text, target=host)  # ignora ctx secundario
+
+    # Classificacao M6.0 (substitui detect_baseline_vs_injected legado
+    # quando temos evidence estruturado; senao cai no fallback).
+    if base_ev and inj_ev:
+        result_m6 = classify(inj_ev, base_ev, auth_ctx)
+        # Mantem compat com formato antigo para o resto da CLI.
+        legacy_result = detect_baseline_vs_injected(base_ev, inj_ev, domain=host)
+        result = {
+            "state": result_m6["state"].upper() if result_m6["state"] != "inconclusive" else "UNKNOWN",
+            "confidence": result_m6["confidence"],
+            "reason": result_m6["reason"],
+            "hints": result_m6["hints"],
+            "context_dependencies": result_m6["context_dependencies"],
+            "api_only_confirmed": result_m6["api_only_confirmed"],
+            "bot_challenge_detected": result_m6["bot_challenge_detected"],
+            "mfa_challenge_detected": result_m6["mfa_challenge_detected"],
+            "auth_mechanism": result_m6["auth_mechanism"],
+            "identity_provider": result_m6["identity_provider"],
+            "session_type": result_m6["session_type"],
+            "auth_context": auth_ctx.to_dict(),
+            # Campos legados para o relatorio antigo nao quebrar.
+            "differential": legacy_result.get("differential", {}),
+            "unknown_reasons": legacy_result.get("unknown_reasons", []),
+        }
+    else:
+        legacy_result = detect_from_summary(baseline, injected, host)
+        # Fallback sem evidence estruturado: ainda assim roda detector
+        # para extrair IdP/mechanism, e classifica como INCONCLUSIVE.
+        result = {
+            "state": legacy_result.get("state", "UNKNOWN"),
+            "confidence": legacy_result.get("confidence", 0.3),
+            "reason": "insufficient_evidence",
+            "hints": [],
+            "context_dependencies": [],
+            "api_only_confirmed": False,
+            "bot_challenge_detected": False,
+            "mfa_challenge_detected": False,
+            "auth_mechanism": auth_ctx.auth_mechanism.value,
+            "identity_provider": auth_ctx.identity_provider.value,
+            "session_type": auth_ctx.session_type.value,
+            "auth_context": auth_ctx.to_dict(),
+            "differential": legacy_result.get("differential", {}),
+            "unknown_reasons": legacy_result.get("unknown_reasons", []),
+        }
+
     return {
         "state": result["state"],
-        "confidence": result.get("confidence", 0),
+        "confidence": result["confidence"],
         "result": result,
         "final_url": injected.get("final_url", ""),
         "cookie_jar_count": len(injected.get("cookie_jar") or []),
@@ -598,6 +876,14 @@ def _probe_one(store, victim_id, domain, scheme, req_path, target_url,
         "error": injected.get("error"),
         "unknown_reasons": result.get("unknown_reasons", []),
         "differential": result.get("differential", {}),
+        # M6.0
+        "reason": result.get("reason", ""),
+        "hints": result.get("hints", []),
+        "context_dependencies": result.get("context_dependencies", []),
+        "auth_mechanism": result.get("auth_mechanism", "unknown"),
+        "identity_provider": result.get("identity_provider", "none"),
+        "session_type": result.get("session_type", "unknown"),
+        "auth_context": result.get("auth_context", {}),
     }
 
 
