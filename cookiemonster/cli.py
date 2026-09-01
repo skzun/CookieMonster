@@ -1078,6 +1078,112 @@ def is_auth_name(name: str) -> bool:
     return is_auth_candidate(name)
 
 
+# ---- Fase M6.3: correlate -- grafo de correlacao de findings ----
+
+@cli.command()
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
+@click.option("--domain", default=None,
+              help="Filtrar por dominio (default: todos).")
+@click.option("--limit", type=int, default=50, show_default=True,
+              help="Limitar runs a processar (ultimos N).")
+@click.option("--out", "out_path", type=click.Path(path_type=Path), default=None,
+              help="Salvar grafo em Markdown (default: imprime no terminal).")
+@click.option("--include-evidence", is_flag=True,
+              help="Incluir evidence por Finding no Markdown.")
+def correlate(db_path: Path, domain: Optional[str], limit: int,
+               out_path: Optional[Path], include_evidence: bool):
+    """Constroi o grafo de correlacao (M6.3) dos ultimos runs.
+
+    Lê runs do store, gera Findings canonicos, aplica regras de
+    correlacao e imprime chains (SESSAO_ARTIFACT -> ... -> AUTH_STATE).
+
+    Perguntas respondidas:
+      - Quais artefatos me levaram ate uma sessao autenticada?
+      - O que esta bloqueando a sessao?
+      - Quais dominios tem CONFIRMED? Quais tem IDP_BOUND?
+
+    Exemplo:
+        python -m cookiemonster correlate --domain chatgpt.com --limit 10
+    """
+    from .correlate import (
+        make_finding_from_run, correlate, find_chains, render_chain,
+        render_graph_markdown,
+    )
+
+    store = _load_store(str(db_path))
+    runs = store.list_runs()[:limit]
+    if domain:
+        runs = [r for r in runs if (r["target_domain"] or "") == domain]
+    if not runs:
+        console.print("[yellow]Nenhum run para correlacionar.[/]")
+        return
+
+    console.print(f"[bold bright_white]=== CookieMonster: correlate ===[/]")
+    console.print(f"  Runs: [yellow]{len(runs)}[/yellow]"
+                  f"  Domain filter: {domain or '(todos)'}")
+
+    # 1) Gera Findings canonicos.
+    all_findings = []
+    for r in runs:
+        all_findings.extend(make_finding_from_run(dict(r)))
+
+    # 2) Constroi grafo via regras.
+    graph = correlate(all_findings)
+
+    # 3) Estatisticas.
+    by_type: Dict[str, int] = {}
+    for f in all_findings:
+        by_type[f.type.value] = by_type.get(f.type.value, 0) + 1
+    console.print(f"\n[bold]Findings: {len(all_findings)}[/bold]")
+    for ftype, n in sorted(by_type.items(), key=lambda x: -x[1]):
+        console.print(f"  [dim]{ftype:35}[/] {n}")
+    console.print(f"\n[bold]Graph:[/bold] {len(graph.findings)} nodes, {len(graph.edges)} edges")
+
+    # 4) Chains principais.
+    chains = find_chains(graph)
+    console.print(f"\n[bold]Attack Chains ({len(chains)}):[/bold]\n")
+    for i, chain in enumerate(chains[:10], 1):
+        console.print(f"[cyan]--- Chain #{i} ---[/cyan]")
+        # Renderiza chain em formato compacto.
+        for fid in chain:
+            f = graph.findings.get(fid)
+            if not f:
+                continue
+            color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow",
+                     "LOW": "dim", "INFO": "dim"}.get(f.severity.value, "dim")
+            console.print(f"  [{color}][{f.severity.value.upper():8}][/{color}] "
+                          f"{f.type.value:30} ({f.confidence:.2f}) "
+                          f"[dim]@ {f.target.domain} run#{f.target.run_id}[/dim]")
+        console.print()
+
+    # 5) Render Markdown.
+    md = render_graph_markdown(graph, include_evidence=include_evidence)
+    if out_path:
+        out_path.write_text(md, encoding="utf-8")
+        console.print(f"\n[dim]Grafo salvo em: {out_path}[/dim]")
+    elif include_evidence:
+        console.print(f"\n[dim]Use --out <arquivo.md> para salvar o grafo completo.[/dim]")
+
+    # 6) Resumo: status por dominio.
+    domain_status: Dict[str, Dict[str, int]] = {}
+    for r in runs:
+        d = r["target_domain"] or "?"
+        s = r["state"] or "?"
+        domain_status.setdefault(d, {}).setdefault(s, 0)
+        domain_status[d][s] += 1
+    console.print(f"\n[bold]Status por dominio:[/bold]")
+    for d, states in sorted(domain_status.items()):
+        parts = ", ".join(f"{s}={n}" for s, n in sorted(states.items(), key=lambda x: -x[1])[:3])
+        confirmed = states.get("CONFIRMED", 0) + states.get("AUTHENTICATED", 0)
+        if confirmed:
+            console.print(f"  [green]{d:30}[/] {parts}")
+        elif states.get("IDP_BOUND", 0) or states.get("MFA_BLOCKED", 0):
+            console.print(f"  [yellow]{d:30}[/] {parts}")
+        else:
+            console.print(f"  [dim]{d:30}[/] {parts}")
+
+
 # ---- Fase B: access -- abrir navegador e deixar o usuario interagir ----
 
 @cli.command()
