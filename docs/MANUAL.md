@@ -834,6 +834,27 @@ python -m cookiemonster dashboard [OPTIONS]
 
 Mostra um resumo amigavel de todos os runs: contagem por estado (CONFIRMED/LIKELY/ANONYMOUS/UNKNOWN), ultimos N runs, e destaque dos alvos com acesso confirmado (com comando para replicar).
 
+### Cancelamento gracioso
+
+`probe-all` pode ser cancelado a qualquer momento sem traceback:
+
+- **Ctrl+C (SIGINT)** — aguarda o worker em andamento terminar, salva o resumo parcial dos runs completos ate o cancelamento. Pressione Ctrl+C **2 vezes** para forcar abort imediato.
+- **ENTER (ou tecla `q`)** — em Windows, `msvcrt` captura tecla; em Linux/Mac, `select` no stdin. Mesma semantica do Ctrl+C.
+
+Apos cancelamento, voce vera:
+
+```
+>>> Ctrl+C detectado. Aguardando workers atuais finalizarem...
+    (pressione Ctrl+C de novo para forcar abort)
+
+=== CANCELADO ===
+  Runs completos antes do cancelamento: 51/200
+  Dica: use --limit N para reduzir o universo de vitimas.
+
+Resumo parcial (3s, 51/200 vitimas)
+  ...
+```
+
 ### 8.15 `probe-all` (varrer todas as vitimas)
 
 ```

