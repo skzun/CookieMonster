@@ -198,7 +198,7 @@ def cookies(db_path: Path, victim: int, domain: str, scheme: str, req_path: str,
               default="strict", show_default=True)
 @click.option("--allow-unsafe-scope", is_flag=True,
               help="Desativa o guardrail de escopo (NÃO recomendado).")
-@click.option("--stealth-profile", "stealth_profile_path",
+@click.option("--stealth-profile", "stealth_profile",
               type=click.Path(path_type=Path), default=None,
               help="OPT-B: perfil de stealth (YAML/JSON) opt-in para LAB com autorizacao.")
 def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
@@ -214,16 +214,16 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
     from .util import scope as scope_util
 
     # OPT-B: carregar stealth profile (opt-in).
-    stealth_profile = None
-    if stealth_profile_path:
+    stealth_profile_obj = None
+    if stealth_profile:
         try:
             from .stealth import load_stealth_profile
-            stealth_profile = load_stealth_profile(stealth_profile_path)
+            stealth_profile_obj = load_stealth_profile(stealth_profile)
             console.print(f"[bold yellow]>>> STEALTH PROFILE ATIVO:[/bold yellow] "
-                          f"{stealth_profile.name} (risk={stealth_profile.risk})")
-            console.print(f"  [dim]{stealth_profile.description}[/dim]")
-            if stealth_profile.required_authorization:
-                console.print(f"  [dim]Authorization: {stealth_profile.required_authorization}[/dim]")
+                          f"{stealth_profile_obj.name} (risk={stealth_profile_obj.risk})")
+            console.print(f"  [dim]{stealth_profile_obj.description}[/dim]")
+            if stealth_profile_obj.required_authorization:
+                console.print(f"  [dim]Authorization: {stealth_profile_obj.required_authorization}[/dim]")
         except Exception as exc:
             console.print(f"[red]Erro ao carregar stealth profile: {exc}[/red]")
             return
