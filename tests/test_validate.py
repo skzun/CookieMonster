@@ -98,3 +98,30 @@ def test_full_confirmed_when_api_authenticated_present():
     result = detect_baseline_vs_injected(base, inj, domain="example.com")
     assert result["state"] == CONFIRMED
     assert result["api_only_confirmed"] is False
+
+
+def test_idp_oauth_no_ui_triggers_api_only():
+    """Cenario real: NextAuth com login via Google OAuth.
+    API /api/auth/session retorna user.id e idp='google-oauth2',
+    mas a UI nao tem authenticated_ui porque cf_clearance expirou.
+    Deve ser LIKELY (api_only), nao CONFIRMED."""
+    base = {
+        "api_user_id_present": False,
+        "api_user_name_present": False,
+        "api_user_email_present": False,
+        "api_authenticated": False,
+        "authenticated_ui": False,
+        "identity_provider": None,
+    }
+    inj = {
+        "api_user_id_present": True,
+        "api_user_name_present": True,
+        "api_user_email_present": True,
+        "api_authenticated": True,
+        "authenticated_ui": False,
+        "identity_provider": "google-oauth2",
+    }
+    result = detect_baseline_vs_injected(base, inj, domain="chatgpt.com")
+    assert result["state"] == LIKELY
+    assert result["api_only_confirmed"] is True
+    assert "api_only_no_ui" in result["hints"]

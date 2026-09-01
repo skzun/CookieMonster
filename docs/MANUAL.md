@@ -705,6 +705,51 @@ Fenômeno comum em SPAs NextAuth/Auth.js: você roda `probe` contra `/api/auth/s
 2. Se a UI mostra o email da vítima já preenchido e só pede senha: a sessão API está OK mas a UI precisa de re-login (token de refresh + novo cookie de UI).
 3. Se a UI mostra tela de login genérica (sem email): cookies expiraram completamente.
 
+### 6.9 OAuth via terceiro (IdP detectado)
+
+Quando a vitima fez login via **Google, Facebook, GitHub, Auth0, Okta** etc (em vez de login direto), o JSON de `/api/auth/session` (ou equivalente) tem um campo `idp` (identity provider):
+
+```json
+{
+  "user": {
+    "id": "user-vnvjMiq83bcQ1M4RsScsHJqh",
+    "email": "jamesngoufack@gmail.com",
+    "idp": "google-oauth2"
+  },
+  "accessToken": "eyJhbGc..."
+}
+```
+
+**A ferramenta detecta automaticamente o IdP** e exibe na saída:
+
+```
+>>> ESTADO: LIKELY (ACESSO PROVAVEL)
+>>> Confianca: 0.70
+>>> API reconheceu identidade, mas UI nao refletiu.
+    IdP detectado: google-oauth2 (login via terceiro)
+    A UI provavelmente exigira re-autenticacao
+    (cf_clearance expirado / IdP check de IP/fingerprint).
+```
+
+**Por que isso importa:**
+- Login via Google/Facebook/etc adiciona uma camada de checagem do IdP (IP, fingerprint, MFA challenge) que **não** está nos cookies capturados.
+- A API reconhece o `accessToken` JWT enquanto ele é válido (pode ser horas), mas a UI exige `cf_clearance` válido do Cloudflare para o seu IP (expira em ~30min) — e/ou o IdP pode pedir MFA se detectar IP novo.
+- Resultado: API autenticada, UI pedindo senha com email pré-preenchido.
+
+**IdPs comuns detectados:**
+- `google-oauth2`, `google` → Google Sign-In
+- `github` → GitHub OAuth
+- `facebook` → Facebook Login
+- `auth0` → Auth0 (universal login)
+- `okta` → Okta SSO
+- `apple` → Sign in with Apple
+- `azure-ad`, `microsoft` → Microsoft Entra ID
+
+**Quando você vê "IdP detectado":**
+1. **A UI vai pedir re-login** (mesmo que a API diga "logado") — isso é o `cf_clearance` ou o IdP recusando o IP/fingerprint novo.
+2. **A "sessão" no sentido prático é parcial**: você tem o JWT de API e o `user.id`, mas a sessão web completa exige uma nova autorização do IdP.
+3. **Re-captura de cookies pode resolver** — se a vitima ainda estiver logada no Google, pedir para ela re-exportar cookies após alguns minutos pode renovar o `cf_clearance`.
+
 ---
 
 ## 7. Troubleshooting

@@ -73,6 +73,16 @@ def detect_baseline_vs_injected(baseline_evidence: Dict,
 
     # Classifier (ordem importa: ANONYMOUS vence sinais positivos).
     api_only_confirmed = False  # CONFIRMED so pela API, sem confirmar UI
+
+    # Cross-check OAuth via terceiro: se o JSON de auth tem identity_provider
+    # (google-oauth2, auth0, okta, etc) mas authenticated_ui=False, a UI
+    # provavelmente exigira re-autenticacao (IdP check de IP/fingerprint).
+    # Marca como api_only mesmo se api_authenticated for True.
+    inj_idp = inj.get("identity_provider")
+    base_idp = base.get("identity_provider")
+    if inj_idp and not base_idp and not inj.get("authenticated_ui"):
+        # API reconheceu via IdP mas UI nao refletiu: api_only.
+        api_only_confirmed = True
     if inj_login:
         state, conf = ANONYMOUS, 0.85
     elif inj_anon and not base_anon:
@@ -86,9 +96,14 @@ def detect_baseline_vs_injected(baseline_evidence: Dict,
         # Se so temos user_id/name/email mas a UI nao confere, rebaixamos
         # para LIKELY porque a API pode estar parcialmente disponivel
         # (ex.: NextAuth /api/auth/session com cookies antigos/renovados).
-        if (inj.get("api_authenticated")
+        ui_confirmed = (
+            inj.get("api_authenticated")
             or inj.get("authenticated_ui")
-            or inj.get("ui_markers")):
+            or inj.get("ui_markers")
+        )
+        # Se IdP foi detectado e nao ha confirmacao UI, rebaixa mesmo se
+        # api_authenticated (o IdP pode ter checagem extra de IP/device).
+        if ui_confirmed and not api_only_confirmed:
             state, conf = CONFIRMED, 0.9
         else:
             # API reconheceu identidade mas UI nao refletiu sessao:
@@ -96,7 +111,11 @@ def detect_baseline_vs_injected(baseline_evidence: Dict,
             state, conf = LIKELY, 0.7
             api_only_confirmed = True
     elif inj_api and not base_api and not inj_login:
-        state, conf = CONFIRMED, 0.85
+        # Mesmo se api_authenticated, IdP sem UI confirmacao rebaixa.
+        if api_only_confirmed:
+            state, conf = LIKELY, 0.7
+        else:
+            state, conf = CONFIRMED, 0.85
     elif inj_ui and not base_ui and not inj_login:
         state, conf = LIKELY, 0.7
     elif inj.get("ui_markers") and not base.get("ui_markers") and not inj_login:

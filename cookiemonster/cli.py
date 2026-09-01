@@ -275,8 +275,16 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
         result_obj = res.get("result") or {}
         if result_obj.get("api_only_confirmed"):
             console.print(f"    [cyan]>>> API reconheceu identidade, mas UI nao refletiu.[/cyan]")
-            console.print(f"    [dim]    Os cookies podem estar parcialmente validos[/dim]")
-            console.print(f"    [dim]    (ex.: cookie de API ok + cookie de UI expirado).[/dim]")
+            # Mostra o Identity Provider se detectado, para explicar o motivo.
+            inj_ev = result_obj.get("injected", {}) or {}
+            idp = inj_ev.get("identity_provider")
+            if idp:
+                console.print(f"    [dim]    IdP detectado: [yellow]{idp}[/yellow] (login via terceiro)[/dim]")
+                console.print(f"    [dim]    A UI provavelmente exigira re-autenticacao[/dim]")
+                console.print(f"    [dim]    (cf_clearance expirado / IdP check de IP/fingerprint).[/dim]")
+            else:
+                console.print(f"    [dim]    Os cookies podem estar parcialmente validos[/dim]")
+                console.print(f"    [dim]    (ex.: cookie de API ok + cookie de UI expirado).[/dim]")
             console.print(f"    [dim]    Tente --url com endpoint de identidade para revalidar.[/dim]")
         else:
             console.print(f"    [cyan]>>> UI autenticada diferencial, sem identidade explicita.[/cyan]")

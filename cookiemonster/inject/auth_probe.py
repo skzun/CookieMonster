@@ -42,6 +42,14 @@ class AuthEvidence:
     session_storage_keys: list = field(default_factory=list)
     console_errors: list = field(default_factory=list)
     request_failures: list = field(default_factory=list)
+    # Identity provider detectado em JSON de auth (ex.: "google-oauth2", "github",
+    # "auth0", "okta"). Indica que o login foi feito via terceiro, o que pode
+    # causar o cenario "api_only" (API reconhece mas UI exige re-autenticacao
+    # porque o IdP tem checagem extra de IP/device/fingerprint).
+    identity_provider: Optional[str] = None
+    # Quando True: o JSON de auth contem `user.id` mas o servidor pode ter
+    # bloqueado a renovacao do cookie de UI. Util para o classificador.
+    session_token_expiry_hint: Optional[str] = None
 
     def confidence_components(self) -> Dict[str, float]:
         return {
@@ -93,9 +101,20 @@ _IDENTITY_KEYS = {
 _AUTH_BOOLEAN_KEYS = ("authenticated", "logged_in", "isLoggedIn",
                       "is_authenticated", "signed_in")
 
+# Chaves que indicam o Identity Provider (terceiro que autenticou o user).
+_IDP_KEYS = ("idp", "provider", "providerId", "federatedProvider",
+             "signInProvider", "authProvider", "iss")
+# Chaves que guardam o JWT de acesso. Util para entender por que a API
+# reconhece a sessao mesmo se a UI pedir re-login.
+_TOKEN_KEYS = ("accessToken", "access_token", "idToken", "id_token")
+# Chaves que guardam a data de expiracao da sessao.
+_EXPIRY_KEYS = ("expires", "expiresAt", "exp", "expiry", "expires_at")
 
-def _extract_json_identity(data: Any, ev: AuthEvidence) -> None:
+
+def _extract_json_identity(data: Any, ev: AuthEvidence, depth: int = 0) -> None:
     """Varre recursivamente o JSON procurando chaves de identidade."""
+    if depth > 6:
+        return
     if isinstance(data, dict):
         for key, val in data.items():
             kl = key.lower()
@@ -104,10 +123,21 @@ def _extract_json_identity(data: Any, ev: AuthEvidence) -> None:
                 setattr(ev, attr, True)
             if kl in (k.lower() for k in _AUTH_BOOLEAN_KEYS) and val is True:
                 ev.api_authenticated = True
-            _extract_json_identity(val, ev)
+            # Detecta IdP (primeiro nivel + no objeto user).
+            if kl in [k.lower() for k in _IDP_KEYS] and isinstance(val, str):
+                if ev.identity_provider is None:
+                    ev.identity_provider = val
+            # Detecta tokens (sinaliza que a sessao API estao OK).
+            if kl in [k.lower() for k in _TOKEN_KEYS] and isinstance(val, str) and len(val) > 20:
+                ev.api_authenticated = True
+            # Detecta expiry.
+            if kl in [k.lower() for k in _EXPIRY_KEYS] and val is not None:
+                if ev.session_token_expiry_hint is None:
+                    ev.session_token_expiry_hint = str(val)
+            _extract_json_identity(val, ev, depth + 1)
     elif isinstance(data, list):
         for item in data:
-            _extract_json_identity(item, ev)
+            _extract_json_identity(item, ev, depth + 1)
 
 
 def collect_auth_responses_body(page: Page, events: PageEvents,
