@@ -635,6 +635,50 @@ UNKNOWN_REASON: api_anon_status (401/403 sem login_redirect explicito)
 UNKNOWN_REASON: login_redirect (servidor redirecionou)
 ```
 
+### 6.6 Lógica de classificação (referência)
+
+`probe`/`probe-all`/`check` rodam em **duas passadas** (Playwright/httpx):
+- **Baseline** = request sem cookies (o que um anônimo vê)
+- **Injetado** = request com cookies da vítima (o que a vítima veria)
+
+A função `detect_baseline_vs_injected()` em `cookiemonster/validate/auth_state.py` aplica esta árvore (a primeira regra que casa vence):
+
+| # | Condição | Estado | Confiança |
+|---|---|---|---|
+| 1 | injetado tem `login_redirect` | **ANONYMOUS** | 0.85 |
+| 2 | injetado tem `api_anon_status` (401/403) e baseline não | **ANONYMOUS** | 0.80 |
+| 3 | injetado tem `api_user_id_present`/`_name_`/`_email_` e baseline não | **CONFIRMED** | 0.90 |
+| 4 | injetado tem `api_authenticated` (200 com payload) e baseline não | **CONFIRMED** | 0.85 |
+| 5 | injetado tem `authenticated_ui` (markers) e baseline não | **LIKELY** | 0.70 |
+| 6 | injetado tem `ui_markers` e baseline não | **LIKELY** | 0.60 |
+| 7 | nenhum dos acima | **UNKNOWN** | 0.30 |
+
+**Degradação de runtime** (console_errors ou request_failures aumentaram no injetado):
+- Se CONFIRMED/LIKELY: confiança cai 0.25 (evita falso positivo).
+- Se ANONYMOUS: confiança sobe 0.05 (erros reforçam a inferência de rejeição).
+
+**O que cada sinal significa na prática:**
+
+- `api_user_id_present` / `api_user_name_present` / `api_user_email_present` — um endpoint de identidade (`/api/auth/session`, `/me`, `/account`) retornou JSON com esses campos.
+- `api_authenticated` — endpoint de identidade retornou 200 com payload que parece autenticado.
+- `api_anon_status` — endpoint retornou 401/403.
+- `authenticated_ui` — DOM contém `Logout`, `My Account`, avatar pessoal, etc.
+- `login_redirect` — redirect 30x para `/login`, `/signin`, `openid`, etc.
+- `ui_markers` — heurística textual mais fraca (presença de strings como "Profile", "Settings").
+
+### 6.7 Por que tantos UNKNOWN em SPAs
+
+Sites como **chatgpt.com, claude.ai, primevideo.com** frequentemente resultam em UNKNOWN massivo mesmo com cookies válidos, porque:
+
+1. **SPA React/Vue/Angular**: a homepage renderiza client-side com a mesma UI para anônimo e autenticado (a tela de chat, por exemplo). O `final_url` é o mesmo e o `body_length_delta` é pequeno.
+2. **Sem endpoint público de identidade**: o cookie `__Secure-next-auth.session-token` é validado pelo `getServerSideProps` do Next.js, mas a homepage pública não expõe a identidade no HTML inicial.
+3. **Identidade só após interação**: clicar em "Settings" ou navegar para `/account` revela o email — mas o probe padrão não navega.
+
+**Como tentar melhorar:**
+- Rode `probe` apontando para a URL interna onde a identidade aparece: `python -m cookiemonster probe --domain chatgpt.com --url https://chatgpt.com/api/auth/session --allow-unsafe-scope`. O JSON de `/api/auth/session` tem `user.email` quando logado.
+- Use `access` para abrir o navegador e clicar manualmente — o `access` salva screenshot em `evidence/` que você pode inspecionar.
+- Tente `--max-wait-ms 15000` (mais tempo para SPAs renderizarem estado pós-redirect).
+
 ---
 
 ## 7. Troubleshooting

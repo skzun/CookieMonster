@@ -432,6 +432,10 @@ def probe_all(db_path: Path, domain: str, limit: int, channel: str,
                         f"vid=[yellow]{r['victim_id']:>5}[/] "
                         f"state=[{color}]{tag:9}[/] auth={r.get('auth', 0)}",
                         highlight=False)
+                    reasons = r.get("unknown_reasons") or []
+                    if reasons:
+                        console.print(f"         [dim dim]motivo: {','.join(reasons[:3])}[/dim]",
+                                      highlight=False)
             finally:
                 if cancelled[0]:
                     for fut in futs:
@@ -473,20 +477,39 @@ def _print_probe_all_summary(results, victims, domain, start_time=None, cancelle
             console.print(f"  [{color}]{state:9}[/] ({pt}): {n}")
 
     console.print(f"\n[bold]Detalhes (top 30)[/bold]")
-    console.print(f"  {'VID':>5}  {'STATE':>9}  {'CONF':>5}  {'AUTH':>4}  {'TOTAL':>5}  {'FINAL_URL':<60}")
+    console.print(f"  {'VID':>5}  {'STATE':>9}  {'CONF':>5}  {'AUTH':>4}  {'TOTAL':>5}  {'MOTIVO':<28}  {'FINAL_URL':<50}")
     sorted_r = sorted(results, key=lambda r: (
         {"CONFIRMED": 0, "LIKELY": 1}.get(r["state"], 2),
         -float(r.get("confidence", 0) or 0)
     ))
     for r in sorted_r[:30]:
         url = r.get("final_url") or "(sem replay)"
-        if len(url) > 58:
-            url = url[:58] + ".."
+        if len(url) > 48:
+            url = url[:48] + ".."
+        reasons = r.get("unknown_reasons") or []
+        motivo = ",".join(reasons) if reasons else "-"
+        if len(motivo) > 26:
+            motivo = motivo[:26] + ".."
         console.print(f"  {r['victim_id']:>5}  {r.get('state', '?'):>9}  "
                       f"{r.get('confidence', 0):5.2f}  {r.get('auth', 0):>4}  "
-                      f"{r.get('total', 0):>5}  {url}")
+                      f"{r.get('total', 0):>5}  {motivo:<28}  {url}")
     if len(results) > 30:
         console.print(f"  [dim]...+ {len(results) - 30} mais[/dim]")
+
+    # Sumario dos motivos UNKNOWN (ajuda o operador a entender o que esta faltando)
+    unknown = [r for r in results if r.get("state") == "UNKNOWN"]
+    if unknown:
+        from collections import Counter as _Counter
+        motivo_counter = _Counter()
+        for r in unknown:
+            for m in (r.get("unknown_reasons") or ["sem_diferencial"]):
+                motivo_counter[m] += 1
+        console.print(f"\n[bold]Diagnostico dos {len(unknown)} UNKNOWN:[/bold]")
+        for m, n in motivo_counter.most_common(8):
+            console.print(f"  [yellow]{m:30}[/] {n} vitimas")
+        console.print(f"  [dim]Glossario: login_redirect=servidor mandou p/ login | "
+                      f"api_anon_status=API retornou 401/403 | js_errors=erros JS no inj | "
+                      f"sem_diferencial=base e inj identicos[/dim]")
 
     confirmed = [r for r in results if r.get("state") == "CONFIRMED"]
     likely = [r for r in results if r.get("state") == "LIKELY"]
@@ -557,6 +580,8 @@ def _probe_one(store, victim_id, domain, scheme, req_path, target_url,
         "auth_count": sum(1 for c in matched if is_auth_name(c["name"])),
         "applied_count": len(matched),
         "error": injected.get("error"),
+        "unknown_reasons": result.get("unknown_reasons", []),
+        "differential": result.get("differential", {}),
     }
 
 
@@ -847,6 +872,30 @@ def dashboard(db_path: Path, limit: int):
     console.print(f"  [red]ANONYMOUS (acesso rejeitado):   {anonymous}[/red]")
     console.print(f"  [yellow]UNKNOWN (indeterminado):       {unknown}[/yellow]")
     console.print()
+
+    # Diagnostico dos UNKNOWN: agrega unknown_reasons de todos os runs
+    unknown_runs = [r for r in all_runs if (r["state"] or "?") == "UNKNOWN"]
+    if unknown_runs:
+        motivo_counter = Counter()
+        for r in unknown_runs:
+            try:
+                import json as _json
+                ev = r.get("evidence_json")
+                if isinstance(ev, str):
+                    ev = _json.loads(ev)
+                elif ev is None:
+                    ev = {}
+                for m in (ev.get("unknown_reasons") or ["sem_diferencial"]):
+                    motivo_counter[m] += 1
+            except Exception:
+                motivo_counter["sem_diferencial"] += 1
+        console.print(f"[bold]Diagnostico dos {len(unknown_runs)} UNKNOWN (motivos):[/bold]")
+        for m, n in motivo_counter.most_common(6):
+            console.print(f"  [yellow]{m:30}[/] {n} runs")
+        console.print(f"  [dim]Glossario: login_redirect=mandou p/ login | "
+                      f"api_anon_status=API 401/403 | js_errors=erros JS | "
+                      f"sem_diferencial=base=inj (cookies aceitos, UI identica)[/dim]")
+        console.print()
 
     # Ultimos N runs com classificacao amigavel
     console.print(f"[bold]ULTIMOS {limit} RUNS:[/bold]\n")
