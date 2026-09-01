@@ -1,0 +1,68 @@
+{
+  "version": "1.0",
+  "labs": [
+    {
+      "name": "Lab A - cookie only",
+      "description": "Servidor aceita qualquer cookie valido. Sem IP/device/anti-bot binding.",
+      "protection": "cookie_only",
+      "expected_outcome": "authenticated",
+      "target_url": "http://lab.example/",
+      "notes": "Baseline. Replay direto deve AUTHENTICATED em todas as variants.",
+      "matrix_variant": "default"
+    },
+    {
+      "name": "Lab B - cookie + IP binding",
+      "description": "Servidor exige IP do login original. Cookie em outro IP rejeita.",
+      "protection": "ip_binding",
+      "expected_outcome": "context_bound",
+      "target_url": "http://lab.example/",
+      "notes": "Replicas via SOCKS5 no IP da vitima = AUTHENTICATED. Replicas de outro IP = ANONYMOUS ou CONTEXT_BOUND.",
+      "matrix_variant": "controlled_alternate"
+    },
+    {
+      "name": "Lab C - cookie + device binding",
+      "description": "Servidor exige fingerprint do navegador original.",
+      "protection": "device_binding",
+      "expected_outcome": "context_bound",
+      "target_url": "http://lab.example/",
+      "notes": "Replicas com fingerprint preservado = AUTHENTICATED. Default = CONTEXT_BOUND ou ANONYMOUS.",
+      "matrix_variant": "preserved"
+    },
+    {
+      "name": "Lab D - OAuth front-channel",
+      "description": "Server valida tokens via IdP mock (Google-like). Cookie sozinho nao basta; API reconhece, UI exige re-auth.",
+      "protection": "oauth_front_channel",
+      "expected_outcome": "idp_bound",
+      "target_url": "http://lab.example/",
+      "notes": "CookieMonster deve classificar como IDP_BOUND com reason 'identity_provider_boundary:*'.",
+      "matrix_variant": "default"
+    },
+    {
+      "name": "Lab E - OAuth + MFA",
+      "description": "IdP exige MFA. Cookie sozinho nao basta.",
+      "protection": "oauth_mfa",
+      "expected_outcome": "mfa_blocked",
+      "target_url": "http://lab.example/",
+      "notes": "CookieMonster deve classificar como MFA_BLOCKED com mfa_challenge detectado.",
+      "matrix_variant": "default"
+    },
+    {
+      "name": "Lab F - anti-bot challenge",
+      "description": "Server retorna challenge JS (Cloudflare-like) antes de aceitar request.",
+      "protection": "anti_bot",
+      "expected_outcome": "bot_blocked",
+      "target_url": "http://lab.example/",
+      "notes": "CookieMonster deve classificar como BOT_BLOCKED com bot_challenge detectado.",
+      "matrix_variant": "default"
+    },
+    {
+      "name": "Lab G - rotating session",
+      "description": "Server invalida cookie apos N requests (forca re-login).",
+      "protection": "rotating_session",
+      "expected_outcome": "inconclusive",
+      "target_url": "http://lab.example/",
+      "notes": "CookieMonster deve classificar como INCONCLUSIVE com hint 'session_token'.",
+      "matrix_variant": "default"
+    }
+  ]
+}
