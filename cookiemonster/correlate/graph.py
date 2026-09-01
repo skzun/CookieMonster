@@ -74,11 +74,18 @@ DEFAULT_RULES: List[Rule] = [
          then_kind=EdgeKind.ENABLES, then_type=FindingType.SESSION_REPLAY,
          label="matching enables replay"),
 
-    # Replay que autentica habilita estado autenticado.
+    # Replay habilita estado de auth (condicional: tambem precisa de CONFIRMED).
     Rule(if_type=FindingType.SESSION_REPLAY,
          and_types=[FindingType.AUTH_STATE_CONFIRMED],
          then_kind=EdgeKind.ENABLES, then_type=FindingType.AUTHENTICATED_STATE,
          label="replay+confirmed enables auth"),
+
+    # SESSION_ARTIFACT habilita diretamente AUTH_STATE_CONFIRMED
+    # (atalho: em chains curtas sem SESSION_REPLAY explicito).
+    Rule(if_type=FindingType.SESSION_ARTIFACT,
+         and_types=[FindingType.AUTH_STATE_CONFIRMED],
+         then_kind=EdgeKind.ENABLES, then_type=FindingType.AUTH_STATE_CONFIRMED,
+         label="artifact+confirmed enables auth"),
 
     # Estado de auth confirmado habilita recurso protegido.
     Rule(if_type=FindingType.AUTH_STATE_CONFIRMED,

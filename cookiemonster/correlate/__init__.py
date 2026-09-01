@@ -20,6 +20,10 @@ from .graph import (
     CorrelationGraph, correlate, find_chains, render_chain,
     render_graph_markdown,
 )
+from .chain import (
+    ChainStep, AttackChain,
+    build_chains, render_chain_pretty, render_all_chains,
+)
 
 __all__ = [
     "Finding", "Target", "Condition", "Engine", "FindingType", "Severity",
@@ -27,4 +31,6 @@ __all__ = [
     "Edge", "EdgeKind", "Rule", "DEFAULT_RULES",
     "CorrelationGraph", "correlate", "find_chains", "render_chain",
     "render_graph_markdown",
+    "ChainStep", "AttackChain", "build_chains",
+    "render_chain_pretty", "render_all_chains",
 ]

@@ -1183,6 +1183,19 @@ def correlate(db_path: Path, domain: Optional[str], limit: int,
         else:
             console.print(f"  [dim]{d:30}[/] {parts}")
 
+    # OPT-A: Attack chains (caminhos de impacto) se houver confirmados.
+    from .correlate import build_chains, render_all_chains
+    chains = build_chains(graph)
+    if chains:
+        console.print(f"\n[bold]ATTACK CHAINS (impacto) - {len(chains)} encontrada(s):[/bold]")
+        text = render_all_chains(chains, include_evidence=include_evidence)
+        # Renderiza cada chain (sem markdown wrapper).
+        for i, ch in enumerate(chains, 1):
+            console.print(f"\n[cyan]--- Chain #{i} ---[/cyan]")
+            from .correlate import render_chain_pretty
+            for line in render_chain_pretty(ch, include_evidence=include_evidence).split("\n"):
+                console.print(line, highlight=False)
+
 
 # ---- Fase M7: attack-plan -- orquestracao declarativa ----
 
