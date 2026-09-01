@@ -8,8 +8,20 @@ from cookiemonster.inject.auth_probe import AuthEvidence
 
 
 def test_differential_confirmed_via_api_user_id():
+    """CONFIRMED exige alem do user_id: api_authenticated, authenticated_ui
+    ou ui_markers. So o user_id eh rebaixado para LIKELY (api_only)."""
     base = {"api_user_id_present": False, "login_redirect": False}
     inj = {"api_user_id_present": True, "login_redirect": False}
+    r = detect_baseline_vs_injected(base, inj, domain="example.com")
+    assert r["state"] == LIKELY
+    assert r["api_only_confirmed"] is True
+
+
+def test_differential_full_confirmed_with_api_authenticated():
+    base = {"api_user_id_present": False, "login_redirect": False,
+            "api_authenticated": False}
+    inj = {"api_user_id_present": True, "login_redirect": False,
+           "api_authenticated": True}
     r = detect_baseline_vs_injected(base, inj, domain="example.com")
     assert r["state"] == CONFIRMED
     assert r["confidence"] >= 0.8

@@ -72,13 +72,29 @@ def detect_baseline_vs_injected(baseline_evidence: Dict,
     )
 
     # Classifier (ordem importa: ANONYMOUS vence sinais positivos).
+    api_only_confirmed = False  # CONFIRMED so pela API, sem confirmar UI
     if inj_login:
         state, conf = ANONYMOUS, 0.85
     elif inj_anon and not base_anon:
         # API de identidade retornou 401/403 no inj mas nao no baseline.
         state, conf = ANONYMOUS, 0.8
     elif identity_diff and not inj_login:
-        state, conf = CONFIRMED, 0.9
+        # CONFIRMED exige pelo menos UM dos:
+        #   - api_authenticated (sinal forte no payload)
+        #   - authenticated_ui (markers no DOM)
+        #   - ui_markers (heuristica textual)
+        # Se so temos user_id/name/email mas a UI nao confere, rebaixamos
+        # para LIKELY porque a API pode estar parcialmente disponivel
+        # (ex.: NextAuth /api/auth/session com cookies antigos/renovados).
+        if (inj.get("api_authenticated")
+            or inj.get("authenticated_ui")
+            or inj.get("ui_markers")):
+            state, conf = CONFIRMED, 0.9
+        else:
+            # API reconheceu identidade mas UI nao refletiu sessao:
+            # pode ser cookie de API valido + cookie de UI expirado.
+            state, conf = LIKELY, 0.7
+            api_only_confirmed = True
     elif inj_api and not base_api and not inj_login:
         state, conf = CONFIRMED, 0.85
     elif inj_ui and not base_ui and not inj_login:
@@ -108,7 +124,14 @@ def detect_baseline_vs_injected(baseline_evidence: Dict,
         reasons.append("login_redirect")
     if inj_ce_count > 0 and inj_ce_count > base_ce_count:
         reasons.append("js_errors")
+    if api_only_confirmed:
+        # API reconheceu identidade mas UI nao refletiu (cookies de UI podem ter expirado)
+        reasons.append("api_only_no_ui")
 
+    # Para o relatorio, queremos ver as razoes tambem em outros estados
+    # (LIKELY com api_only, etc). UNKNOWN_REASON eh o nome historico;
+    # mantemos para UNKNOWN mas tambem devolvemos o array completo
+    # como "hints" para o operador.
     return {
         "state": state,
         "confidence": conf,
@@ -116,7 +139,9 @@ def detect_baseline_vs_injected(baseline_evidence: Dict,
         "baseline": base,
         "injected": inj,
         "differential": _differential(base, inj),
+        "api_only_confirmed": api_only_confirmed,
         "unknown_reasons": reasons if state == UNKNOWN else [],
+        "hints": reasons,
     }
 
 

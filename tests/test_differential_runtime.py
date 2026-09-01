@@ -21,15 +21,32 @@ def test_anon_on_api_403():
     assert r["state"] == ANONYMOUS
 
 
-def test_console_errors_reduce_confirmed_confidence():
+def test_console_errors_reduce_likely_confidence():
+    """Com nova logica, so api_user_id = LIKELY (api_only).
+    Console errors degradam confianca em 0.25."""
     base = {}
     inj = {
         "api_user_id_present": True,
         "console_errors": [{"message": "TypeError: ..."}],
     }
     r = detect_baseline_vs_injected(base, inj, domain="example.com")
+    assert r["state"] == LIKELY
+    # Confianca base 0.7 (api_only), degradada em 0.25 = 0.45
+    assert r["confidence"] < 0.7
+    assert r["confidence"] >= 0.4
+
+
+def test_console_errors_reduce_full_confirmed_confidence():
+    """CONFIRMED com api_authenticated + api_user_id + console_errors
+    continua CONFIRMED, mas confianca cai 0.25 (0.9 - 0.25 = 0.65)."""
+    base = {"api_authenticated": False, "api_user_id_present": False}
+    inj = {
+        "api_authenticated": True,
+        "api_user_id_present": True,
+        "console_errors": [{"message": "TypeError: ..."}],
+    }
+    r = detect_baseline_vs_injected(base, inj, domain="example.com")
     assert r["state"] == CONFIRMED
-    # Confianca base 0.9, degradada em 0.25 = 0.65
     assert r["confidence"] < 0.9
     assert r["confidence"] >= 0.6
 

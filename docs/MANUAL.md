@@ -647,20 +647,24 @@ A função `detect_baseline_vs_injected()` em `cookiemonster/validate/auth_state
 |---|---|---|---|
 | 1 | injetado tem `login_redirect` | **ANONYMOUS** | 0.85 |
 | 2 | injetado tem `api_anon_status` (401/403) e baseline não | **ANONYMOUS** | 0.80 |
-| 3 | injetado tem `api_user_id_present`/`_name_`/`_email_` e baseline não | **CONFIRMED** | 0.90 |
+| 3 | injetado tem `api_user_id/name/email` E (`api_authenticated` OU `authenticated_ui` OU `ui_markers`) | **CONFIRMED** | 0.90 |
+| 3a | injetado tem `api_user_id/name/email` mas **só API** (sem UI/auth flag) | **LIKELY (api_only)** | 0.70 |
 | 4 | injetado tem `api_authenticated` (200 com payload) e baseline não | **CONFIRMED** | 0.85 |
 | 5 | injetado tem `authenticated_ui` (markers) e baseline não | **LIKELY** | 0.70 |
 | 6 | injetado tem `ui_markers` e baseline não | **LIKELY** | 0.60 |
 | 7 | nenhum dos acima | **UNKNOWN** | 0.30 |
 
-**Degradação de runtime** (console_errors ou request_failures aumentaram no injetado):
-- Se CONFIRMED/LIKELY: confiança cai 0.25 (evita falso positivo).
-- Se ANONYMOUS: confiança sobe 0.05 (erros reforçam a inferência de rejeição).
+**`api_only` (regra 3a)**: acontece em sites como NextAuth onde `/api/auth/session` retorna o JSON de identidade mas a UI web não reflete a sessão. Razões comuns:
+- O `__Secure-next-auth.session-token` da API é diferente do cookie de UI.
+- O cookie de UI expirou mas o JWT interno ainda é válido (até o servidor rotacionar).
+- A UI exige checagem extra (ex.: `cf_clearance` válido) que a API não exige.
+
+**Sinal prático:** você rodou `probe` contra `/api/auth/session` e deu CONFIRMED/LIKELY, mas ao abrir no navegador (`access`) a homepage mostra tela de login. Isso é `api_only` — o cookie de API está válido mas a UI exige mais. A ferramenta **não declara conta comprometida** nesse caso.
 
 **O que cada sinal significa na prática:**
 
 - `api_user_id_present` / `api_user_name_present` / `api_user_email_present` — um endpoint de identidade (`/api/auth/session`, `/me`, `/account`) retornou JSON com esses campos.
-- `api_authenticated` — endpoint de identidade retornou 200 com payload que parece autenticado.
+- `api_authenticated` — endpoint de identidade retornou 200 com payload que parece autenticado, OU tem boolean `authenticated: true`.
 - `api_anon_status` — endpoint retornou 401/403.
 - `authenticated_ui` — DOM contém `Logout`, `My Account`, avatar pessoal, etc.
 - `login_redirect` — redirect 30x para `/login`, `/signin`, `openid`, etc.
@@ -678,6 +682,28 @@ Sites como **chatgpt.com, claude.ai, primevideo.com** frequentemente resultam em
 - Rode `probe` apontando para a URL interna onde a identidade aparece: `python -m cookiemonster probe --domain chatgpt.com --url https://chatgpt.com/api/auth/session --allow-unsafe-scope`. O JSON de `/api/auth/session` tem `user.email` quando logado.
 - Use `access` para abrir o navegador e clicar manualmente — o `access` salva screenshot em `evidence/` que você pode inspecionar.
 - Tente `--max-wait-ms 15000` (mais tempo para SPAs renderizarem estado pós-redirect).
+
+### 6.8 Caso `api_only`: API reconheceu mas UI pediu login
+
+Fenômeno comum em SPAs NextAuth/Auth.js: você roda `probe` contra `/api/auth/session` e a ferramenta diz **CONFIRMED 0.90**, mas ao abrir `access` a homepage mostra tela de login com o email da vítima já preenchido pedindo senha.
+
+**Por que acontece:**
+- O cookie de API (`__Secure-next-auth.session-token` ou similar) é válido e o JWT interno (accessToken) ainda é aceito pelo backend.
+- Mas a UI web exige cookies adicionais (`cf_clearance` do Cloudflare, cookie de sessão do app, etc) que podem ter expirado.
+- A diferença entre "API autenticada" e "sessão web válida" é real: a API aceita o token mas a UI exige mais.
+
+**Como a ferramenta trata:**
+- A regra 3 da árvore de classificação rebaixa CONFIRMED para **LIKELY (api_only)** quando só a API reconhece e a UI não.
+- A confiança fica em 0.70.
+- O motivo `api_only_no_ui` aparece em `hints`/`unknown_reasons`.
+- O `access` salva screenshot em `evidence/` e detecta URLs de login.
+
+**Sinal concreto:** o run mostra `api_user_id_present: True` no JSON do endpoint mas `authenticated_ui: False` no DOM. Isso é `api_only`.
+
+**Ação recomendada:**
+1. Veja o screenshot em `evidence/access_<host>_<vid>.png`.
+2. Se a UI mostra o email da vítima já preenchido e só pede senha: a sessão API está OK mas a UI precisa de re-login (token de refresh + novo cookie de UI).
+3. Se a UI mostra tela de login genérica (sem email): cookies expiraram completamente.
 
 ---
 

@@ -271,7 +271,14 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
     elif state == CONFIRMED:
         console.print(f"    [green]>>> Identidade diferencial detectada. Acesso provavel.[/green]")
     elif state == LIKELY:
-        console.print(f"    [cyan]>>> UI autenticada diferencial, sem identidade explicita.[/cyan]")
+        result_obj = res.get("result") or {}
+        if result_obj.get("api_only_confirmed"):
+            console.print(f"    [cyan]>>> API reconheceu identidade, mas UI nao refletiu.[/cyan]")
+            console.print(f"    [dim]    Os cookies podem estar parcialmente validos[/dim]")
+            console.print(f"    [dim]    (ex.: cookie de API ok + cookie de UI expirado).[/dim]")
+            console.print(f"    [dim]    Tente --url com endpoint de identidade para revalidar.[/dim]")
+        else:
+            console.print(f"    [cyan]>>> UI autenticada diferencial, sem identidade explicita.[/cyan]")
     elif state == "NO_COOKIES":
         console.print(f"    [yellow]>>> Nenhum cookie aplicavel para a URL.[/yellow]")
     else:

@@ -21,6 +21,7 @@ Cookies/
 # Playwright
 test-results/
 playwright-report/
+evidence/
 
 # IDE / SO
 .idea/
