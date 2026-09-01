@@ -55,6 +55,8 @@ class Store:
             conn.execute("ALTER TABLE runs ADD COLUMN auth_context_json TEXT")
         if "reason" not in run_cols:
             conn.execute("ALTER TABLE runs ADD COLUMN reason TEXT")
+        if "variant_label" not in run_cols:
+            conn.execute("ALTER TABLE runs ADD COLUMN variant_label TEXT")
 
     @contextmanager
     def batch(self) -> Iterator[sqlite3.Connection]:
@@ -130,7 +132,7 @@ class Store:
             return conn.execute(
                 "SELECT r.id, r.victim_id, v.dir_name, r.target_domain, r.target_url,"
                 " r.channel, r.state, r.confidence, r.started, r.finished,"
-                " r.evidence_json, r.auth_context_json, r.reason,"
+                " r.evidence_json, r.auth_context_json, r.reason, r.variant_label,"
                 " (SELECT COUNT(*) FROM findings f WHERE f.run_id = r.id) AS finding_count"
                 " FROM runs r JOIN victims v ON v.id = r.victim_id"
                 " ORDER BY r.id DESC"
@@ -267,22 +269,24 @@ class Store:
                    confidence: float | None = None,
                    evidence_json: str | None = None,
                    auth_context_json: str | None = None,
-                   reason: str | None = None) -> int:
+                   reason: str | None = None,
+                   variant_label: str | None = None) -> int:
         """Registra um `run` e retorna seu id (para inserir findings depois).
 
         M6.0: aceita auth_context_json (AuthContext serializado) e reason
         (string canonica da classificacao).
+        M6.2: aceita variant_label (rotulo da ContextVariant executada).
         """
         conn = self._connect()
         try:
             cur = conn.execute(
                 "INSERT INTO runs (victim_id, target_url, target_domain, channel,"
                 " state, confidence, started, finished, evidence_json,"
-                " auth_context_json, reason)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " auth_context_json, reason, variant_label)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (victim_id, target_url, target_domain, channel, state, confidence,
                  datetime.now(timezone.utc).isoformat(timespec="seconds"), None,
-                 evidence_json, auth_context_json, reason),
+                 evidence_json, auth_context_json, reason, variant_label),
             )
             conn.commit()
             return cur.lastrowid
