@@ -24,6 +24,10 @@ from .chain import (
     ChainStep, AttackChain,
     build_chains, render_chain_pretty, render_all_chains,
 )
+from .rules import (
+    load_rules, merge_rules, load_user_rules, render_rules_markdown,
+    DEFAULT_RULES_PATH,
+)
 
 __all__ = [
     "Finding", "Target", "Condition", "Engine", "FindingType", "Severity",
@@ -33,4 +37,6 @@ __all__ = [
     "render_graph_markdown",
     "ChainStep", "AttackChain", "build_chains",
     "render_chain_pretty", "render_all_chains",
+    "load_rules", "merge_rules", "load_user_rules", "render_rules_markdown",
+    "DEFAULT_RULES_PATH",
 ]

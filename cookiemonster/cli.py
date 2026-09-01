@@ -1110,8 +1110,12 @@ def is_auth_name(name: str) -> bool:
               help="Salvar grafo em Markdown (default: imprime no terminal).")
 @click.option("--include-evidence", is_flag=True,
               help="Incluir evidence por Finding no Markdown.")
+@click.option("--rules-file", "rules_file", type=click.Path(path_type=Path), default=None,
+              help="OPT-C: arquivo YAML com regras customizadas. "
+                   "Default: ~/.config/cookiemonster/rules.yaml")
 def correlate(db_path: Path, domain: Optional[str], limit: int,
-               out_path: Optional[Path], include_evidence: bool):
+               out_path: Optional[Path], include_evidence: bool,
+               rules_file: Optional[Path]):
     """Constroi o grafo de correlacao (M6.3) dos ultimos runs.
 
     Lê runs do store, gera Findings canonicos, aplica regras de
@@ -1127,7 +1131,7 @@ def correlate(db_path: Path, domain: Optional[str], limit: int,
     """
     from .correlate import (
         make_finding_from_run, correlate, find_chains, render_chain,
-        render_graph_markdown,
+        render_graph_markdown, load_rules, merge_rules, load_user_rules,
     )
 
     store = _load_store(str(db_path))
@@ -1137,6 +1141,13 @@ def correlate(db_path: Path, domain: Optional[str], limit: int,
     if not runs:
         console.print("[yellow]Nenhum run para correlacionar.[/]")
         return
+
+    # OPT-C: carrega regras custom (arquivo explicito ou ~/.config).
+    custom_rules = load_rules(rules_file) if rules_file else load_user_rules()
+    rules = merge_rules(custom_rules)
+    if custom_rules:
+        console.print(f"[dim]OPT-C: {len(custom_rules)} regras customizadas carregadas "
+                      f"(total: {len(rules)})[/dim]")
 
     console.print(f"[bold bright_white]=== CookieMonster: correlate ===[/]")
     console.print(f"  Runs: [yellow]{len(runs)}[/yellow]"
@@ -1148,7 +1159,7 @@ def correlate(db_path: Path, domain: Optional[str], limit: int,
         all_findings.extend(make_finding_from_run(dict(r)))
 
     # 2) Constroi grafo via regras.
-    graph = correlate(all_findings)
+    graph = correlate(all_findings, rules=rules)
 
     # 3) Estatisticas.
     by_type: Dict[str, int] = {}
