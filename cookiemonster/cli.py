@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import signal
 import sys
 import threading
@@ -873,9 +874,44 @@ def dashboard(db_path: Path, limit: int):
     anonymous = state_counter.get("ANONYMOUS", 0)
     unknown = state_counter.get("?", 0) + state_counter.get("UNKNOWN", 0)
 
+    # Subdivide LIKELY: api_only (sinal soh de API) vs UI real
+    # Runs antigos (pre-api_only) nao tem o campo; conta como UI real
+    # para nao inflar artificialmente o grupo api_only.
+    likely_api_only = 0
+    likely_ui_real = 0
+    likely_unknown = 0
+    for r in all_runs:
+        if (r["state"] or "?") != "LIKELY":
+            continue
+        ev_raw = r["evidence_json"]
+        if isinstance(ev_raw, str):
+            try:
+                ev = json.loads(ev_raw)
+            except Exception:
+                ev = {}
+        elif ev_raw is None:
+            ev = {}
+        else:
+            ev = dict(ev_raw)
+        if "api_only_confirmed" not in ev:
+            likely_unknown += 1
+        elif ev.get("api_only_confirmed"):
+            likely_api_only += 1
+        else:
+            likely_ui_real += 1
+
     console.print(f"[bold]TOTAL: {total} runs[/bold]")
     console.print(f"  [green]CONFIRMED (acesso confirmado): {confirmed}[/green]")
-    console.print(f"  [cyan]LIKELY (acesso provavel):     {likely}[/cyan]")
+    if likely and (likely_api_only or likely_unknown):
+        console.print(f"  [cyan]LIKELY (acesso provavel):       {likely}[/cyan]")
+        if likely_ui_real:
+            console.print(f"    [dim]├─ UI real (markers DOM):       {likely_ui_real}[/dim]")
+        if likely_api_only:
+            console.print(f"    [dim]├─ api_only (soh API, sem UI): {likely_api_only}[/dim]")
+        if likely_unknown:
+            console.print(f"    [dim]└─ runs antigos (sem flag):     {likely_unknown}[/dim]")
+    else:
+        console.print(f"  [cyan]LIKELY (acesso provavel):     {likely}[/cyan]")
     console.print(f"  [red]ANONYMOUS (acesso rejeitado):   {anonymous}[/red]")
     console.print(f"  [yellow]UNKNOWN (indeterminado):       {unknown}[/yellow]")
     console.print()
